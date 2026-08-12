@@ -1,0 +1,42 @@
+* text=auto
+
+# C++ source and header files
+*.cpp text eol=crlf working-tree-encoding=UTF-8
+*.h text eol=crlf working-tree-encoding=UTF-8
+
+# CMake
+CMakeLists.txt text eol=crlf working-tree-encoding=UTF-8
+*.cmake text eol=crlf working-tree-encoding=UTF-8
+
+# Qt resource files
+*.qrc text eol=crlf working-tree-encoding=UTF-8
+*.rc text eol=crlf working-tree-encoding=UTF-8
+*.pro text eol=crlf working-tree-encoding=UTF-8
+*.pri text eol=crlf working-tree-encoding=UTF-8
+
+# Python
+*.py text eol=crlf working-tree-encoding=UTF-8
+
+# Markdown and documentation
+*.md text eol=crlf working-tree-encoding=UTF-8
+*.txt text eol=crlf working-tree-encoding=UTF-8
+
+# Git config files
+.gitignore text eol=crlf working-tree-encoding=UTF-8
+.gitattributes text eol=crlf working-tree-encoding=UTF-8
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.gif binary
+*.bmp binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.zip binary
+*.tar.gz binary
+*.7z binary
+*.pdf binary

@@ -1,0 +1,593 @@
+#include "App.h"
+#include "clipboard/ClipboardManager.h"
+#include "core/Hash.h"
+#include "core/Log.h"
+#include "core/Protocol.h"
+#include "input/WinInputCapturer.h"
+#include "input/WinInputInjector.h"
+#include "network/NetworkClient.h"
+#include "network/NetworkServer.h"
+#include "router/ScreenRouter.h"
+#include "transfer/FileTransferManager.h"
+
+#include <algorithm>
+#include <chrono>
+#include <random>
+
+#include <QTimer>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+namespace zb {
+
+App::App(QObject* parent) : QObject(parent) {}
+
+App::~App() {
+    stop();
+}
+
+bool App::isConnected() const {
+    return connected_.load();
+}
+
+// ---------------------------------------------------------------------------
+// State helpers — emit signals; Qt delivers them to the GUI thread safely.
+// ---------------------------------------------------------------------------
+
+void App::setStatus(const QString& s) {
+    ZB_LOG_INFO("{}", s.toStdString());
+    emit statusChanged(s);
+}
+
+void App::setConnected(bool v, const std::string& name, uint32_t w, uint32_t h) {
+    connected_ = v;
+    emit connectionChanged(v, QString::fromStdString(name), w, h);
+}
+
+void App::onTransferOffer(uint64_t id, uint64_t total) {
+    emit transferProgress(id, 0, total);
+}
+
+void App::onTransferProgress(uint64_t id, uint64_t transferred, uint64_t total) {
+    emit transferProgress(static_cast<quint64>(id),
+                          static_cast<quint64>(transferred),
+                          static_cast<quint64>(total));
+}
+
+void App::onTransferComplete(uint64_t id, bool ok, const std::string& msg) {
+    emit transferComplete(static_cast<quint64>(id), ok,
+                          QString::fromStdString(msg));
+}
+
+void App::installLogSink() {
+    log::addSink([this](log::Level lvl, std::string_view line) {
+        QString tag;
+        switch (lvl) {
+            case log::Level::Debug: tag = "DBG"; break;
+            case log::Level::Info:  tag = "INF"; break;
+            case log::Level::Warn:  tag = "WRN"; break;
+            case log::Level::Error: tag = "ERR"; break;
+        }
+        // Emitting from arbitrary threads is safe with auto/queued connections
+        // because the signal arguments are Qt-shared types (QString).
+        emit logMessage(tag, QString::fromUtf8(line.data(), static_cast<int>(line.size())));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+QString App::roleDescription() const {
+    return isServer_.load() ? QStringLiteral("控制端") : QStringLiteral("被控端");
+}
+
+void App::setLayout(ScreenLayout layout) {
+    layout_ = layout;
+    if (router_) {
+        router_->setLayout(layout);
+    }
+    // 本地主动变更时同步给对端；来自对端的变更不再回发，避免回环。
+    if (!applyingRemoteLayout_.load()) {
+        sendLayoutSync();
+    }
+}
+
+void App::sendLayoutSync() {
+    if (!running_.load() || !connected_.load()) return;
+    LayoutSyncMsg msg;
+    msg.layout = layout_;
+    std::vector<uint8_t> payload = serializeLayoutSync(msg);
+    if (isServer_.load()) {
+        if (server_ && server_->isReady())
+            server_->sendControl(MsgType::LayoutSync, payload);
+    } else {
+        if (client_ && client_->isReady())
+            client_->sendControl(MsgType::LayoutSync, payload);
+    }
+}
+
+void App::applyRemoteLayout(ScreenLayout layout) {
+    applyingRemoteLayout_ = true;
+    setLayout(layout);
+    applyingRemoteLayout_ = false;
+    // 通知 GUI 更新设备位置画布（在 GUI 线程执行）。
+    emit layoutChanged(layout);
+}
+
+void App::startServer(const AppConfig& cfg) {
+    if (running_.load()) return;
+    launchServer(cfg, true);
+}
+
+void App::startClient(const AppConfig& cfg) {
+    if (running_.load()) return;
+    launchClient(cfg, cfg.host);
+}
+
+void App::launchServer(const AppConfig& cfg, bool enableDiscovery) {
+    config_ = cfg;
+    layout_ = layoutFromString(cfg.layout);
+
+    std::string name = cfg.serverName;
+    if (name.empty()) {
+        char hostname[256]{};
+        DWORD size = sizeof(hostname);
+        if (GetComputerNameA(hostname, &size)) name = hostname;
+        else name = "ZeroBorders-Server";
+    }
+
+    localW_ = static_cast<uint32_t>(GetSystemMetrics(SM_CXSCREEN));
+    localH_ = static_cast<uint32_t>(GetSystemMetrics(SM_CYSCREEN));
+
+    TokenHash token = sha256(cfg.pairingCode);
+
+    server_ = std::make_unique<NetworkServer>(token, name,
+        cfg.controlPort, cfg.dataPort, cfg.udpPort);
+    capturer_ = std::make_unique<WinInputCapturer>();
+    clipboard_ = std::make_unique<ClipboardManager>();
+    router_ = std::make_unique<ScreenRouter>();
+    fileTransfer_ = std::make_unique<FileTransferManager>();
+    inputSender_ = std::make_unique<InputEventSender>();
+
+    wireServerCallbacks();
+
+    isServer_ = true;
+    running_ = true;
+
+    setStatus(QStringLiteral("等待对端连接..."));
+
+    server_->start(
+        [this] {
+            setConnected(true, "", localW_, localH_);
+            clientW_ = localW_;
+            clientH_ = localH_;
+            router_->configure(localW_, localH_, clientW_.load(),
+                               clientH_.load(), layout_);
+            setStatus(QStringLiteral("对端已连接"));
+            // Sync local clipboard to the newly connected peer.
+            if (clipboard_) clipboard_->syncNow();
+            // Push the current relative layout to the peer so both sides
+            // start from the same arrangement.
+            sendLayoutSync();
+        },
+        [this](const std::string& reason) {
+            setConnected(false);
+            router_->forceLocalControl();
+            // Only show a subtle status; do not pop up dialogs or stop
+            // the service. The server has already restarted UDP discovery
+            // and will accept a new connection automatically.
+            if (running_.load()) {
+                setStatus(QStringLiteral("对端已断开，静默等待重新连接..."));
+            } else {
+                setStatus(QStringLiteral("对端已断开：") + QString::fromStdString(reason));
+            }
+        },
+        enableDiscovery);
+
+    capturer_->start([this](const InputEvent& ev) -> bool {
+        if (server_ && server_->isReady()) return router_->processEvent(ev);
+        return false;
+    });
+}
+
+void App::launchClient(const AppConfig& cfg, const std::string& host,
+                       int connectTimeoutMs) {
+    config_ = cfg;
+    layout_ = layoutFromString(cfg.layout);
+
+    TokenHash token = sha256(cfg.pairingCode);
+
+    client_ = std::make_unique<NetworkClient>(token,
+        cfg.controlPort, cfg.dataPort, cfg.udpPort);
+    injector_ = std::make_unique<WinInputInjector>();
+    clipboard_ = std::make_unique<ClipboardManager>();
+    fileTransfer_ = std::make_unique<FileTransferManager>();
+
+    wireClientCallbacks();
+
+    isServer_ = false;
+    running_ = true;
+
+    setStatus(host.empty() ? QStringLiteral("正在搜索对端...")
+                           : QStringLiteral("正在连接 %1...").arg(QString::fromStdString(host)));
+
+    auto onReady = [this](const WelcomeMsg& w) {
+        setConnected(true, "", w.screenWidth, w.screenHeight);
+        setStatus(QStringLiteral("已连接，对端分辨率 %1x%2")
+                      .arg(w.screenWidth).arg(w.screenHeight));
+        // Sync local clipboard to the newly connected peer.
+        if (clipboard_) clipboard_->syncNow();
+    };
+    auto onDisconnect = [this](const std::string& reason) {
+        bool wasConnected = connected_.exchange(false);
+        hasControl_ = false;
+        emit connectionChanged(false, "", 0, 0);
+        if (wasConnected && running_.load()) {
+            setStatus(QStringLiteral("连接断开，静默等待重新连接..."));
+        } else if (!running_.load()) {
+            setStatus(QStringLiteral("已断开：") + QString::fromStdString(reason));
+        }
+    };
+
+    bool ok = false;
+    if (!host.empty()) {
+        ok = client_->connectToHost(host, onReady, onDisconnect, connectTimeoutMs);
+    } else {
+        ok = client_->start(onReady, onDisconnect, 15000);
+    }
+
+    if (!ok) {
+        setStatus(QStringLiteral("连接建立失败"));
+        resetSession();
+        running_ = false;
+        emit sessionStopped();
+    }
+}
+
+void App::launchClientAuto(const AppConfig& cfg, const std::string& host) {
+    // Called on the UDP discovery thread after election. There is a small
+    // race: the server side may not have bound its TCP listener yet. We wait
+    // briefly and retry a couple of times. This runs on a background thread,
+    // so blocking here does not freeze the UI.
+    isServer_ = false;
+
+    auto tryConnect = [this, &cfg, &host](int timeoutMs) -> bool {
+        // launchClient sets up members and blocks until connected or timeout.
+        // On failure it calls resetSession() + sets running_ = false.
+        // We need to restore running_ so we can retry.
+        launchClient(cfg, host, timeoutMs);
+        return connected_.load();
+    };
+
+    // First attempt after a short delay to let the server start listening.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (!running_.load()) return;
+    if (tryConnect(3000)) return;
+
+    // Second attempt after a longer delay.
+    if (!running_.load()) return;
+    setStatus(QStringLiteral("正在重试连接..."));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    if (!running_.load()) return;
+    running_ = true; // launchClient failure cleared it
+    if (tryConnect(3000)) return;
+
+    // Final attempt.
+    if (!running_.load()) return;
+    setStatus(QStringLiteral("正在重试连接..."));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    if (!running_.load()) return;
+    running_ = true;
+    tryConnect(5000);
+}
+
+void App::startAuto(const AppConfig& cfg) {
+    if (running_.load()) return;
+    config_ = cfg;
+    layout_ = layoutFromString(cfg.layout);
+
+    std::random_device rd;
+    std::mt19937_64 rng(rd());
+    nodeId_ = rng();
+    if (nodeId_ == 0) nodeId_ = 1;
+
+    TokenHash token = sha256(cfg.pairingCode);
+
+    running_ = true;
+    autoMode_ = true;
+    isServer_ = false;
+
+    setStatus(QStringLiteral("正在局域网搜索对端..."));
+
+    autoDiscovery_ = std::make_unique<UdpDiscovery>();
+    // The callback runs on the UDP discovery thread. After finding a peer,
+    // the discovery thread keeps broadcasting for a ~3s grace period so the
+    // other side also receives our packet. We must NOT join/reset it here
+    // (that would block). Instead post the session launch to the main thread
+    // and schedule cleanup after the grace period elapses.
+    autoDiscovery_->startAuto(cfg.udpPort, token, nodeId_, cfg.rolePreference,
+        [this, cfg](const std::string& peerIp, UdpDiscovery::AutoRole role) {
+            bool isServer = (role == UdpDiscovery::AutoRole::Server);
+            QMetaObject::invokeMethod(this, [this, cfg, peerIp, isServer] {
+                emit roleDetermined(isServer);
+
+                if (isServer) {
+                    ZB_LOG_INFO("Auto role: server (controlling side)");
+                    std::thread([this, cfg] {
+                        launchServer(cfg, false);
+                    }).detach();
+                } else {
+                    ZB_LOG_INFO("Auto role: client (controlled side), peer={}", peerIp);
+                    std::thread([this, cfg, peerIp] {
+                        launchClientAuto(cfg, peerIp);
+                    }).detach();
+                }
+
+                // Discovery thread enters a 3s grace period after onFound.
+                // Schedule reset after it finishes to avoid blocking the UI.
+                QTimer::singleShot(4000, this, [this] {
+                    if (autoDiscovery_) {
+                        autoDiscovery_.reset();
+                    }
+                });
+            }, Qt::QueuedConnection);
+        });
+}
+
+void App::stop() {
+    if (!running_.exchange(false)) return;
+
+    ZB_LOG_INFO("Stopping session...");
+    if (autoDiscovery_) {
+        autoDiscovery_->stop();
+        autoDiscovery_.reset();
+    }
+    if (inputSender_) inputSender_->stop();
+    if (fileTransfer_) fileTransfer_->cancelAll();
+    if (capturer_) capturer_->stop();
+    if (clipboard_) clipboard_->stop();
+    if (server_) server_->stop();
+    if (client_) client_->stop();
+
+    autoMode_ = false;
+    resetSession();
+    setConnected(false);
+    setStatus(QStringLiteral("已停止"));
+    emit sessionStopped();
+}
+
+void App::resetSession() {
+    autoDiscovery_.reset();
+    inputSender_.reset();
+    fileTransfer_.reset();
+    capturer_.reset();
+    injector_.reset();
+    clipboard_.reset();
+    router_.reset();
+    server_.reset();
+    client_.reset();
+}
+
+// ---------------------------------------------------------------------------
+// File transfer
+// ---------------------------------------------------------------------------
+
+uint64_t App::sendFiles(const std::vector<std::string>& paths) {
+    if (!fileTransfer_ || !running_.load()) return 0;
+    return fileTransfer_->sendFiles(paths);
+}
+
+void App::acceptTransfer(uint64_t id, const std::string& destDir) {
+    if (fileTransfer_) fileTransfer_->accept(id, destDir);
+}
+
+void App::rejectTransfer(uint64_t id) {
+    if (fileTransfer_) fileTransfer_->reject(id);
+}
+
+// ---------------------------------------------------------------------------
+// Server wiring
+// ---------------------------------------------------------------------------
+
+void App::wireFileTransferCallbacks() {
+    fileTransfer_->onProgress([this](uint64_t id, uint64_t x, uint64_t tot) {
+        onTransferProgress(id, x, tot);
+    });
+    fileTransfer_->onComplete([this](uint64_t id, bool ok, const std::string& m) {
+        onTransferComplete(id, ok, m);
+    });
+    fileTransfer_->onOffer([this](uint64_t id, const std::vector<TransferEntry>&,
+                                  uint64_t total) {
+        onTransferOffer(id, total);
+    });
+
+    // Incoming offers: forward to the UI as a queued signal so a confirmation
+    // dialog can be shown. The UI calls acceptTransfer/rejectTransfer.
+    fileTransfer_->setIncomingOfferCallback(
+        [this](uint64_t id, const std::vector<TransferEntry>& entries, uint64_t total) {
+            QStringList names;
+            names.reserve(static_cast<int>(entries.size()));
+            for (const auto& e : entries) {
+                names << QString::fromStdString(e.relativePath);
+            }
+            emit incomingOffer(static_cast<quint64>(id), names,
+                               static_cast<quint64>(total));
+        });
+
+    // Configure the default receive directory (used as a fallback / when the
+    // incoming-offer callback accepts without overriding the directory).
+    if (!config_.receiveDir.empty()) {
+        fileTransfer_->setDefaultReceiveDir(config_.receiveDir);
+    }
+
+    // When a clipboard-initiated file transfer completes, put the received
+    // file paths into the local clipboard so Ctrl+V works on the receiver.
+    fileTransfer_->setClipboardCompleteCallback(
+        [this](uint64_t /*id*/, const std::vector<std::string>& paths) {
+            if (clipboard_) clipboard_->setRemoteFiles(paths);
+        });
+}
+
+void App::wireServerCallbacks() {
+    fileTransfer_->setSendCallback([this](MsgType t, const std::vector<uint8_t>& p) {
+        if (server_) server_->sendData(t, p);
+    });
+    wireFileTransferCallbacks();
+
+    // Dedicated sender thread coalesces mouse-move events so the hook thread
+    // never blocks on TCP sends and clicks are not delayed by a move backlog.
+    inputSender_->start([this](const InputEvent& ev) {
+        if (server_ && server_->isReady()) {
+            server_->sendControl(MsgType::InputEvent, serializeInputEvent(ev));
+        }
+    });
+
+    clipboard_->start([this](const ClipboardContent& content) {
+        if (!server_ || !server_->isReady()) return;
+        if (content.format == ClipboardFormat::Text) {
+            ClipboardTextMsg msg;
+            msg.text = content.text;
+            server_->sendControl(MsgType::ClipboardText, serializeClipboardText(msg));
+        } else if (content.format == ClipboardFormat::Image) {
+            ClipboardImageMsg msg;
+            msg.width = content.imageWidth;
+            msg.height = content.imageHeight;
+            msg.data = content.pngData;
+            server_->sendData(MsgType::ClipboardImage, serializeClipboardImage(msg));
+        } else if (content.format == ClipboardFormat::Files) {
+            if (fileTransfer_) {
+                fileTransfer_->sendFiles(content.filePaths, 1);  // flags=1 → clipboard
+            }
+        }
+    });
+
+    router_->onCursorEnter([this](const CursorEnterMsg& msg) {
+        if (server_) server_->sendControl(MsgType::CursorEnter, serializeCursorEnter(msg));
+    });
+    router_->onSuppress([this](bool suppress) {
+        if (capturer_) capturer_->setSuppress(suppress);
+    });
+    router_->onWarpCursor([this](int32_t x, int32_t y) {
+        if (capturer_) capturer_->warpCursor(x, y);
+        else SetCursorPos(x, y);
+    });
+    router_->onReleaseButtons([this] {
+        if (capturer_) capturer_->releaseAllButtons();
+    });
+    router_->onCursorVisible([this](bool visible) {
+        if (capturer_) capturer_->setCursorVisible(visible);
+    });
+    router_->onSendEvent([this](const InputEvent& ev) {
+        if (inputSender_) inputSender_->submit(ev);
+    });
+
+    server_->onControlMessage([this](MsgType t, const std::vector<uint8_t>& p) {
+        try {
+            if (t == MsgType::CursorLeave) {
+                CursorLeaveMsg msg{};
+                if (parseCursorLeave(p, msg)) router_->handleCursorLeave(msg.edge);
+            } else if (t == MsgType::ClipboardText) {
+                ClipboardTextMsg msg{};
+                if (parseClipboardText(p, msg)) clipboard_->setRemoteText(msg.text);
+            } else if (t == MsgType::LayoutSync) {
+                LayoutSyncMsg msg{};
+                if (parseLayoutSync(p, msg)) applyRemoteLayout(msg.layout);
+            }
+        } catch (const std::exception& e) {
+            ZB_LOG_ERROR("Server ctrl callback error: {}", e.what());
+        }
+    });
+
+    server_->onDataMessage([this](MsgType t, const std::vector<uint8_t>& p) {
+        try {
+            if (t == MsgType::ClipboardImage) {
+                ClipboardImageMsg msg{};
+                if (parseClipboardImage(p, msg))
+                    clipboard_->setRemoteImage(msg.data, msg.width, msg.height);
+            } else if (fileTransfer_) {
+                fileTransfer_->handleMessage(t, p);
+            }
+        } catch (const std::exception& e) {
+            ZB_LOG_ERROR("Server data callback error: {}", e.what());
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Client wiring
+// ---------------------------------------------------------------------------
+
+void App::wireClientCallbacks() {
+    fileTransfer_->setSendCallback([this](MsgType t, const std::vector<uint8_t>& p) {
+        if (client_) client_->sendData(t, p);
+    });
+    wireFileTransferCallbacks();
+
+    clipboard_->start([this](const ClipboardContent& content) {
+        if (!client_ || !client_->isReady()) return;
+        if (content.format == ClipboardFormat::Text) {
+            ClipboardTextMsg msg;
+            msg.text = content.text;
+            client_->sendControl(MsgType::ClipboardText, serializeClipboardText(msg));
+        } else if (content.format == ClipboardFormat::Image) {
+            ClipboardImageMsg msg;
+            msg.width = content.imageWidth;
+            msg.height = content.imageHeight;
+            msg.data = content.pngData;
+            client_->sendData(MsgType::ClipboardImage, serializeClipboardImage(msg));
+        } else if (content.format == ClipboardFormat::Files) {
+            if (fileTransfer_) {
+                fileTransfer_->sendFiles(content.filePaths, 1);
+            }
+        }
+    });
+
+    client_->onControlMessage([this](MsgType t, const std::vector<uint8_t>& p) {
+        try {
+            if (t == MsgType::InputEvent) {
+                if (hasControl_.load()) {
+                    InputEvent ev{};
+                    if (parseInputEvent(p, ev)) injector_->inject(ev);
+                }
+            } else if (t == MsgType::CursorEnter) {
+                CursorEnterMsg msg{};
+                if (parseCursorEnter(p, msg)) {
+                    injector_->injectMouseMove(msg.x, msg.y);
+                    hasControl_ = true;
+                }
+            } else if (t == MsgType::Ping) {
+                uint64_t ts = 0;
+                if (parsePingPong(p, ts))
+                    client_->sendControl(MsgType::Pong, serializePingPong(ts));
+            } else if (t == MsgType::ClipboardText) {
+                ClipboardTextMsg msg{};
+                if (parseClipboardText(p, msg)) clipboard_->setRemoteText(msg.text);
+            } else if (t == MsgType::LayoutSync) {
+                LayoutSyncMsg msg{};
+                if (parseLayoutSync(p, msg)) applyRemoteLayout(msg.layout);
+            }
+        } catch (const std::exception& e) {
+            ZB_LOG_ERROR("Client ctrl callback error: {}", e.what());
+        }
+    });
+
+    client_->onDataMessage([this](MsgType t, const std::vector<uint8_t>& p) {
+        try {
+            if (t == MsgType::ClipboardImage) {
+                ClipboardImageMsg msg{};
+                if (parseClipboardImage(p, msg))
+                    clipboard_->setRemoteImage(msg.data, msg.width, msg.height);
+            } else if (fileTransfer_) {
+                fileTransfer_->handleMessage(t, p);
+            }
+        } catch (const std::exception& e) {
+            ZB_LOG_ERROR("Client data callback error: {}", e.what());
+        }
+    });
+}
+
+} // namespace zb

@@ -1,0 +1,7 @@
+# 构建输出目录
+/build/
+
+/.vs
+/out
+/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules
+/.codex-tmp

@@ -68,6 +68,9 @@ public:
     // Dynamically change the screen layout while connected (server side only).
     void setLayout(ScreenLayout layout);
 
+    // Notify peer of updated local receive directory (called when user edits path).
+    void notifyPathSync();
+
     // File transfer (sender). Returns 0 on failure.
     uint64_t sendFiles(const std::vector<std::string>& paths);
 
@@ -90,6 +93,8 @@ signals:
     void sessionStopped();
     // 对端通过 LayoutSync 推送了新的相对屏幕布局。
     void layoutChanged(ScreenLayout layout);
+    // 对端通过 PathSync 推送了其接收目录路径。
+    void remoteReceiveDirChanged(const QString& dir);
 
 private:
     void resetSession();
@@ -108,6 +113,10 @@ private:
     void applyRemoteLayout(ScreenLayout layout);
     // 通过控制通道把当前 layout_ 广播给对端。
     void sendLayoutSync();
+    // 通过控制通道把当前接收目录广播给对端。
+    void sendPathSync();
+    // 应用来自对端的 PathSync。
+    void applyRemotePath(const std::string& dir);
 
     // Internal launchers used by startServer/startClient/startAuto.
     void launchServer(const AppConfig& cfg, bool enableDiscovery);
@@ -117,6 +126,12 @@ private:
     // handle the race where the server's TCP listener isn't ready immediately
     // after auto-discovery election. Runs on the calling (background) thread.
     void launchClientAuto(const AppConfig& cfg, const std::string& host);
+
+    // Called on the GUI thread (via queued invocation) after a disconnect in
+    // auto mode. Stops the current server/client and restarts UDP discovery
+    // so both sides can find each other again regardless of which one
+    // crashed or restarted.
+    void restartAutoDiscovery();
 
     AppConfig config_;
     ScreenLayout layout_ = ScreenLayout::LeftOf;

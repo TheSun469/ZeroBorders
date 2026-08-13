@@ -1,5 +1,10 @@
 # 构建输出目录
 /build/
+/build_release/
+/dist/
+
+# 运行时日志目录
+/log/
 
 /.vs
 /out

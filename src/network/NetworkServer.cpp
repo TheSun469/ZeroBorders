@@ -83,13 +83,21 @@ void NetworkServer::stop() {
         discovery_->stop();
         discovery_.reset();
     }
-    // Run teardown synchronously on the calling thread (never a recv thread).
-    teardownImpl("正在停止");
+    // If a teardown is already in progress on the cleanup thread, wait for it
+    // to finish BEFORE running our own. Otherwise we would race on the
+    // transport pointers and fire onDisconnect_ twice (the cleanup thread's
+    // teardownImpl fires it once for the real session loss; the one below
+    // sees ready_==false and skips it).
     if (cleanupThread_.joinable()) cleanupThread_.join();
+    // Run a final synchronous teardown on the calling thread (never a recv
+    // thread). tearingDown_ is false here because the cleanup thread resets
+    // it on exit; set it to guard against re-entry during onDisconnect_.
+    tearingDown_ = true;
+    teardownImpl("正在停止");
+    tearingDown_ = false;
     if (ctrlAcceptThread_.joinable()) ctrlAcceptThread_.join();
     if (dataAcceptThread_.joinable()) dataAcceptThread_.join();
     ready_ = false;
-    tearingDown_ = false;
 }
 
 void NetworkServer::acceptControlLoop() {
@@ -275,10 +283,7 @@ void NetworkServer::restartDiscovery() {
 
 void NetworkServer::teardownImpl(const std::string& reason) {
     bool wasReady = ready_.exchange(false);
-    if (!running_.load() && !wasReady && ctrlState_ == CtrlState::WaitingHello) {
-        // best-effort cleanup only
-    }
-    ZB_LOG_INFO("Server teardown: {}", reason);
+    ZB_LOG_INFO("Server teardown: {} (wasReady={})", reason, wasReady);
 
     std::shared_ptr<TcpTransport> ctrl;
     std::shared_ptr<TcpTransport> data;
@@ -300,7 +305,12 @@ void NetworkServer::teardownImpl(const std::string& reason) {
     ctrlState_ = CtrlState::WaitingHello;
     dataState_ = DataState::WaitingHello;
 
-    if (onDisconnect_) onDisconnect_(reason);
+    // Only notify the application when a real session was lost. This avoids
+    // double-firing onDisconnect_ when stop() runs a final teardown after
+    // the cleanup thread already handled the disconnect, and avoids
+    // notifying on handshake failures (which the accept loops recover from
+    // automatically).
+    if (wasReady && onDisconnect_) onDisconnect_(reason);
 
     // If the server is still running (not being stopped by the user) and
     // discovery was enabled, restart UDP broadcast so the peer can discover
@@ -312,13 +322,26 @@ void NetworkServer::teardownImpl(const std::string& reason) {
 }
 
 void NetworkServer::sendControl(MsgType t, const std::vector<uint8_t>& p) {
-    std::lock_guard<std::mutex> lk(stateMutex_);
-    if (ctrl_) ctrl_->send(t, p);
+    // Copy the transport pointer under the lock, then release the lock before
+    // calling send(). send() may fail and trigger fireDisconnect() -> postTeardown(),
+    // which joins the cleanup thread; doing that while holding stateMutex_
+    // would deadlock if the cleanup thread is itself waiting on stateMutex_
+    // inside teardownImpl().
+    std::shared_ptr<TcpTransport> ctrl;
+    {
+        std::lock_guard<std::mutex> lk(stateMutex_);
+        ctrl = ctrl_;
+    }
+    if (ctrl) ctrl->send(t, p);
 }
 
 void NetworkServer::sendData(MsgType t, const std::vector<uint8_t>& p) {
-    std::lock_guard<std::mutex> lk(stateMutex_);
-    if (data_) data_->send(t, p);
+    std::shared_ptr<TcpTransport> data;
+    {
+        std::lock_guard<std::mutex> lk(stateMutex_);
+        data = data_;
+    }
+    if (data) data->send(t, p);
 }
 
 } // namespace zb

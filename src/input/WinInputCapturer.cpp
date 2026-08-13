@@ -232,7 +232,13 @@ LRESULT CALLBACK WinInputCapturer::keyboardProc(int code, WPARAM wParam, LPARAM 
         bool injected = (info->flags & LLKHF_INJECTED) != 0;
         bool suppressEvent = false;
         if (!injected && instance_->callback_) {
-            suppressEvent = instance_->callback_(ev);
+            try {
+                suppressEvent = instance_->callback_(ev);
+            } catch (const std::exception& e) {
+                ZB_LOG_ERROR("Keyboard hook callback exception: {}", e.what());
+            } catch (...) {
+                ZB_LOG_ERROR("Keyboard hook callback unknown exception");
+            }
         }
 
         // Suppress if either the global suppress flag is on or the callback
@@ -377,7 +383,13 @@ LRESULT CALLBACK WinInputCapturer::mouseProc(int code, WPARAM wParam, LPARAM lPa
             // Do not forward injected events to the remote.
             bool suppressEvent = false;
             if (!injected && instance_->callback_) {
-                suppressEvent = instance_->callback_(ev);
+                try {
+                    suppressEvent = instance_->callback_(ev);
+                } catch (const std::exception& e) {
+                    ZB_LOG_ERROR("Mouse hook callback exception: {}", e.what());
+                } catch (...) {
+                    ZB_LOG_ERROR("Mouse hook callback unknown exception");
+                }
             }
             // Suppress if the global suppress flag is on OR the callback
             // explicitly requested it. The callback return value is critical

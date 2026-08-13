@@ -37,6 +37,25 @@ inline void removeAllSinks() {
     sinks().clear();
 }
 
+// File logging: append every log line to a per-day file under logDir.
+// The directory is created if missing. Safe to call once at startup.
+// Declared here, implemented in Log.cpp (non-inline to keep std::ofstream
+// out of the header).
+void addFileSink(const std::string& logDir);
+
+// Build the per-day log file name: zb_YYYYMMDD.log
+std::string getLogFileName();
+
+// Low-level crash writer: appends a raw byte sequence to today's log file
+// without going through the sink machinery. Used by the crash handler so we
+// can record a stack trace even when the process state is corrupt.
+void writeToCrashLog(const std::string& logDir, std::string_view text);
+
+// Returns the log directory currently configured by addFileSink(). Returns
+// an empty string if file logging was never enabled. Used by the crash
+// handler to locate the destination file without touching sink state.
+const std::string& activeLogDir();
+
 inline void write(Level lvl, std::string_view msg) {
     const char* tag = "DBG";
     switch (lvl) {

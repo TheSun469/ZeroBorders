@@ -40,6 +40,13 @@ public:
     void onControlMessage(MessageCallback cb) { userCtrl_ = std::move(cb); }
     void onDataMessage(MessageCallback cb) { userData_ = std::move(cb); }
 
+    // Restart UDP broadcast so peers can rediscover us after a disconnect.
+    // Called by App when running in auto mode (where the initial launch
+    // disables server-side discovery because autoDiscovery_ was already
+    // active). Without this, the server stays in TCP-listen-only mode and
+    // a restarted peer cannot find it via UDP.
+    void restartDiscovery();
+
 private:
     enum class CtrlState { WaitingHello, Ready, Closed };
     enum class DataState { WaitingHello, Ready, Closed };
@@ -51,7 +58,6 @@ private:
     void checkReady();
     void postTeardown(const std::string& reason);
     void teardownImpl(const std::string& reason);
-    void restartDiscovery();
 
     static SOCKET createListener(uint16_t port);
 

@@ -89,6 +89,11 @@ private:
     std::atomic<bool> reconnecting_{false};
     std::string lastHost_;
     int reconnectDelaySec_ = 1;
+
+    // Allows stop() to break the reconnect thread out of its backoff wait
+    // immediately instead of blocking for up to 30 seconds on join().
+    std::mutex reconnectMtx_;
+    std::condition_variable reconnectCv_;
 };
 
 } // namespace zb

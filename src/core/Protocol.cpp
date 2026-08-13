@@ -263,6 +263,19 @@ bool parseLayoutSync(const std::vector<uint8_t>& d, LayoutSyncMsg& out) {
     return true;
 }
 
+// ---- PathSync ----
+
+std::vector<uint8_t> serializePathSync(const PathSyncMsg& m) {
+    Writer w;
+    w.string(m.receiveDir);
+    return w.take();
+}
+
+bool parsePathSync(const std::vector<uint8_t>& d, PathSyncMsg& out) {
+    Reader r(d.data(), d.size());
+    return r.string(out.receiveDir);
+}
+
 // ---- Clipboard serialization ----
 
 std::vector<uint8_t> serializeClipboardText(const ClipboardTextMsg& m) {

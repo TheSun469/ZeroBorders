@@ -3,6 +3,7 @@ set(ZB_SOURCES
     App.h
     App.cpp
     core/Log.h
+    core/Log.cpp
     core/Types.h
     core/Hash.h
     core/Hash.cpp
@@ -38,6 +39,8 @@ set(ZB_SOURCES
     gui/MainWindow.cpp
     gui/DeviceLayoutWidget.h
     gui/DeviceLayoutWidget.cpp
+    gui/PathComboBox.h
+    gui/PathComboBox.cpp
     ${CMAKE_SOURCE_DIR}/resources/app.rc
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )
@@ -57,6 +60,7 @@ target_link_libraries(ZeroBorders PRIVATE
     iphlpapi
     user32
     gdi32
+    dbghelp
 )
 
 set_target_properties(ZeroBorders PROPERTIES

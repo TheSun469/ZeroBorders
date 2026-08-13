@@ -118,6 +118,28 @@ void App::applyRemoteLayout(ScreenLayout layout) {
     emit layoutChanged(layout);
 }
 
+void App::sendPathSync() {
+    if (!running_.load() || !connected_.load()) return;
+    PathSyncMsg msg;
+    msg.receiveDir = config_.receiveDir;
+    auto payload = serializePathSync(msg);
+    if (isServer_.load()) {
+        if (server_ && server_->isReady())
+            server_->sendControl(MsgType::PathSync, payload);
+    } else {
+        if (client_ && client_->isReady())
+            client_->sendControl(MsgType::PathSync, payload);
+    }
+}
+
+void App::notifyPathSync() {
+    sendPathSync();
+}
+
+void App::applyRemotePath(const std::string& dir) {
+    emit remoteReceiveDirChanged(QString::fromStdString(dir));
+}
+
 void App::startServer(const AppConfig& cfg) {
     if (running_.load()) return;
     launchServer(cfg, true);
@@ -173,15 +195,27 @@ void App::launchServer(const AppConfig& cfg, bool enableDiscovery) {
             // Push the current relative layout to the peer so both sides
             // start from the same arrangement.
             sendLayoutSync();
+            // Exchange receive directory paths so each side can display
+            // where files will land on the remote machine.
+            sendPathSync();
         },
         [this](const std::string& reason) {
             setConnected(false);
-            router_->forceLocalControl();
-            // Only show a subtle status; do not pop up dialogs or stop
-            // the service. The server has already restarted UDP discovery
-            // and will accept a new connection automatically.
+            if (router_) router_->forceLocalControl();
             if (running_.load()) {
-                setStatus(QStringLiteral("对端已断开，静默等待重新连接..."));
+                setStatus(QStringLiteral("对端已断开，正在重新搜索..."));
+                // In auto mode the server was launched with discovery
+                // disabled (autoDiscovery_ was still running at launch time).
+                // Restart UDP broadcast now so a restarted peer can find us.
+                // Post to the GUI thread because this callback runs on the
+                // server's cleanup thread.
+                if (autoMode_.load() && server_) {
+                    QMetaObject::invokeMethod(this, [this] {
+                        if (autoMode_.load() && running_.load() && server_) {
+                            server_->restartDiscovery();
+                        }
+                    }, Qt::QueuedConnection);
+                }
             } else {
                 setStatus(QStringLiteral("对端已断开：") + QString::fromStdString(reason));
             }
@@ -227,7 +261,17 @@ void App::launchClient(const AppConfig& cfg, const std::string& host,
         hasControl_ = false;
         emit connectionChanged(false, "", 0, 0);
         if (wasConnected && running_.load()) {
-            setStatus(QStringLiteral("连接断开，静默等待重新连接..."));
+            setStatus(QStringLiteral("连接断开，正在重新搜索..."));
+            // In auto mode, the client's built-in scheduleReconnect only
+            // tries direct TCP to lastHost_. If the server crashed and
+            // restarted (new process), it may have a different IP or may
+            // need UDP discovery. Post to the GUI thread to stop the
+            // client and restart full auto discovery.
+            if (autoMode_.load()) {
+                QMetaObject::invokeMethod(this, [this] {
+                    restartAutoDiscovery();
+                }, Qt::QueuedConnection);
+            }
         } else if (!running_.load()) {
             setStatus(QStringLiteral("已断开：") + QString::fromStdString(reason));
         }
@@ -338,20 +382,97 @@ void App::startAuto(const AppConfig& cfg) {
         });
 }
 
+void App::restartAutoDiscovery() {
+    // Runs on the GUI thread (posted via QMetaObject::invokeMethod from the
+    // disconnect callback). If the client already managed to reconnect via
+    // scheduleReconnect before we got here, bail out.
+    if (!autoMode_.load() || !running_.load()) return;
+    if (connected_.load()) return;
+
+    ZB_LOG_INFO("Restarting auto discovery after disconnect");
+
+    // Stop the current client (and its reconnect thread) or server.
+    // scheduleReconnect uses a condition variable so stop() returns quickly.
+    if (client_) client_->stop();
+    if (server_) server_->stop();
+
+    // Tear down all session-specific components. running_ stays true so the
+    // session is considered active (just searching for a peer).
+    if (capturer_) { capturer_->stop(); }
+    if (clipboard_) { clipboard_->stop(); }
+    if (inputSender_) { inputSender_->stop(); }
+    if (fileTransfer_) { fileTransfer_->cancelAll(); }
+
+    client_.reset();
+    server_.reset();
+    capturer_.reset();
+    injector_.reset();
+    clipboard_.reset();
+    router_.reset();
+    fileTransfer_.reset();
+    inputSender_.reset();
+    autoDiscovery_.reset();
+
+    isServer_ = false;
+    hasControl_ = false;
+
+    setStatus(QStringLiteral("正在重新搜索对端..."));
+
+    // Reuse the existing nodeId_ so role election is stable across reconnects.
+    TokenHash token = sha256(config_.pairingCode);
+    autoDiscovery_ = std::make_unique<UdpDiscovery>();
+    autoDiscovery_->startAuto(config_.udpPort, token, nodeId_, config_.rolePreference,
+        [this](const std::string& peerIp, UdpDiscovery::AutoRole role) {
+            bool isServer = (role == UdpDiscovery::AutoRole::Server);
+            QMetaObject::invokeMethod(this, [this, peerIp, isServer] {
+                if (!running_.load() || connected_.load()) return;
+                emit roleDetermined(isServer);
+
+                if (isServer) {
+                    ZB_LOG_INFO("Auto role: server (controlling side)");
+                    std::thread([this] {
+                        launchServer(config_, false);
+                    }).detach();
+                } else {
+                    ZB_LOG_INFO("Auto role: client (controlled side), peer={}", peerIp);
+                    std::thread([this, peerIp] {
+                        launchClientAuto(config_, peerIp);
+                    }).detach();
+                }
+
+                QTimer::singleShot(4000, this, [this] {
+                    if (autoDiscovery_) {
+                        autoDiscovery_.reset();
+                    }
+                });
+            }, Qt::QueuedConnection);
+        });
+}
+
 void App::stop() {
     if (!running_.exchange(false)) return;
 
     ZB_LOG_INFO("Stopping session...");
+
+    // Shutdown order matters: stop the producers of work first so the
+    // consumers below are not touched by in-flight callbacks.
+    //   1. UDP discovery  - no more peer notifications
+    //   2. Input capturer - hook thread stops calling router/server
+    //   3. Network server/client - recv threads stop calling
+    //      fileTransfer/clipboard callbacks
+    //   4. Input sender   - drain pending events
+    //   5. File transfer  - safe to cancel now that recv threads are gone
+    //   6. Clipboard      - listener thread stops last
     if (autoDiscovery_) {
         autoDiscovery_->stop();
         autoDiscovery_.reset();
     }
-    if (inputSender_) inputSender_->stop();
-    if (fileTransfer_) fileTransfer_->cancelAll();
     if (capturer_) capturer_->stop();
-    if (clipboard_) clipboard_->stop();
     if (server_) server_->stop();
     if (client_) client_->stop();
+    if (inputSender_) inputSender_->stop();
+    if (fileTransfer_) fileTransfer_->cancelAll();
+    if (clipboard_) clipboard_->stop();
 
     autoMode_ = false;
     resetSession();
@@ -496,6 +617,9 @@ void App::wireServerCallbacks() {
             } else if (t == MsgType::LayoutSync) {
                 LayoutSyncMsg msg{};
                 if (parseLayoutSync(p, msg)) applyRemoteLayout(msg.layout);
+            } else if (t == MsgType::PathSync) {
+                PathSyncMsg msg{};
+                if (parsePathSync(p, msg)) applyRemotePath(msg.receiveDir);
             }
         } catch (const std::exception& e) {
             ZB_LOG_ERROR("Server ctrl callback error: {}", e.what());
@@ -569,6 +693,9 @@ void App::wireClientCallbacks() {
             } else if (t == MsgType::LayoutSync) {
                 LayoutSyncMsg msg{};
                 if (parseLayoutSync(p, msg)) applyRemoteLayout(msg.layout);
+            } else if (t == MsgType::PathSync) {
+                PathSyncMsg msg{};
+                if (parsePathSync(p, msg)) applyRemotePath(msg.receiveDir);
             }
         } catch (const std::exception& e) {
             ZB_LOG_ERROR("Client ctrl callback error: {}", e.what());

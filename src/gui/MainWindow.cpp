@@ -48,6 +48,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&app_, &App::logMessage, this, &MainWindow::onLogMessage);
     connect(&app_, &App::sessionStopped, this, &MainWindow::onSessionStopped);
     connect(&app_, &App::layoutChanged, this, &MainWindow::onRemoteLayoutChanged);
+    connect(&app_, &App::remoteReceiveDirChanged, this, &MainWindow::onRemoteReceiveDirChanged);
 
     app_.installLogSink();
     buildTrayIcon();
@@ -99,18 +100,10 @@ void MainWindow::buildUi() {
     settingsGroup_ = new QGroupBox(QStringLiteral("设置"), central);
     auto* setLayout = new QGridLayout(settingsGroup_);
 
-    auto* recvLabel = new QLabel(QStringLiteral("接收文件夹："), settingsGroup_);
-    receiveDirEdit_ = new QLineEdit(settingsGroup_);
-    receiveDirEdit_->setPlaceholderText(QStringLiteral("默认：%TEMP%\\ZeroBorders"));
-    browseReceiveBtn_ = new QPushButton(QStringLiteral("浏览..."), settingsGroup_);
-    setLayout->addWidget(recvLabel, 0, 0);
-    setLayout->addWidget(receiveDirEdit_, 0, 1);
-    setLayout->addWidget(browseReceiveBtn_, 0, 2);
-
     autoStartCheck_ = new QCheckBox(QStringLiteral("开机自动启动"), settingsGroup_);
     minimizeToTrayCheck_ = new QCheckBox(QStringLiteral("关闭窗口时最小化到托盘"), settingsGroup_);
-    setLayout->addWidget(autoStartCheck_, 1, 0, 1, 2);
-    setLayout->addWidget(minimizeToTrayCheck_, 1, 2);
+    setLayout->addWidget(autoStartCheck_, 0, 0);
+    setLayout->addWidget(minimizeToTrayCheck_, 0, 1);
 
     root->addWidget(settingsGroup_);
 
@@ -125,6 +118,26 @@ void MainWindow::buildUi() {
     // ---- File transfer group ---------------------------------------------
     transferGroup_ = new QGroupBox(QStringLiteral("文件传输"), central);
     auto* transLayout = new QVBoxLayout(transferGroup_);
+
+    // Path row: left = local receive dir, right = remote receive dir.
+    auto* pathRow = new QGridLayout();
+    pathRow->setColumnStretch(1, 1);
+    pathRow->setColumnStretch(3, 1);
+
+    auto* localPathLabel = new QLabel(QStringLiteral("本地路径："), transferGroup_);
+    localPathCombo_ = new PathComboBox(transferGroup_);
+    localPathCombo_->setPlaceholderText(QStringLiteral("默认：%TEMP%\\ZeroBorders"));
+
+    auto* remotePathLabel = new QLabel(QStringLiteral("远程路径："), transferGroup_);
+    remotePathCombo_ = new PathComboBox(transferGroup_);
+    remotePathCombo_->setReadOnly(true);
+    remotePathCombo_->setPlaceholderText(QStringLiteral("未连接"));
+
+    pathRow->addWidget(localPathLabel, 0, 0);
+    pathRow->addWidget(localPathCombo_, 0, 1);
+    pathRow->addWidget(remotePathLabel, 0, 2);
+    pathRow->addWidget(remotePathCombo_, 0, 3);
+    transLayout->addLayout(pathRow);
 
     fileList_ = new QListWidget(transferGroup_);
     fileList_->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -174,7 +187,7 @@ void MainWindow::buildUi() {
     connect(clearFilesBtn_, &QPushButton::clicked, fileList_, &QListWidget::clear);
     connect(sendBtn_, &QPushButton::clicked, this, &MainWindow::onSendFiles);
     connect(clearLogBtn_, &QPushButton::clicked, logView_, &QPlainTextEdit::clear);
-    connect(browseReceiveBtn_, &QPushButton::clicked, this, &MainWindow::onBrowseReceiveDir);
+    connect(localPathCombo_, &PathComboBox::pathChanged, this, &MainWindow::onLocalPathChanged);
     connect(autoStartCheck_, &QCheckBox::toggled, this, &MainWindow::onToggleAutoStart);
 
     // Layout widget: persist and push live while connected.
@@ -205,7 +218,7 @@ void MainWindow::loadConfig() {
             static_cast<uint32_t>(sz.height()));
     }
 
-    receiveDirEdit_->setText(QString::fromStdString(config_.receiveDir));
+    localPathCombo_->setPath(QString::fromStdString(config_.receiveDir));
     minimizeToTrayCheck_->setChecked(config_.startMinimized);
     autoStartCheck_->blockSignals(true);
     autoStartCheck_->setChecked(ConfigManager::instance().isAutoStartEnabled());
@@ -224,7 +237,7 @@ AppConfig MainWindow::collectConfig() const {
 
     c.layout = layoutToString(layoutWidget_->layout());
 
-    c.receiveDir = receiveDirEdit_->text().trimmed().toStdString();
+    c.receiveDir = localPathCombo_->path().toStdString();
     c.startMinimized = minimizeToTrayCheck_->isChecked();
     return c;
 }
@@ -236,8 +249,7 @@ AppConfig MainWindow::collectConfig() const {
 void MainWindow::setRunningUi(bool running) {
     codeEdit_->setEnabled(!running);
     rolePrefCombo_->setEnabled(!running);
-    receiveDirEdit_->setEnabled(!running);
-    browseReceiveBtn_->setEnabled(!running);
+    localPathCombo_->setEnabled(!running);
     startBtn_->setText(running ? QStringLiteral("断开连接") : QStringLiteral("开始连接"));
     sendBtn_->setEnabled(running && app_.isConnected());
     if (startStopAction_) startStopAction_->setText(running ? QStringLiteral("断开") : QStringLiteral("开始连接"));
@@ -377,6 +389,8 @@ void MainWindow::onConnectionChanged(bool connected, const QString& peerName,
         sendBtn_->setEnabled(false);
         layoutWidget_->setConnected(false);
         layoutWidget_->setPeerName(QString());
+        remotePathCombo_->setPath(QString());
+        remotePathCombo_->setPlaceholderText(QStringLiteral("未连接"));
         if (trayIcon_) {
             trayIcon_->setIcon(makeTrayIcon(false));
             trayIcon_->setToolTip(QStringLiteral("零界 ZeroBorders（未连接）"));
@@ -444,12 +458,12 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 // Settings
 // ---------------------------------------------------------------------------
 
-void MainWindow::onBrowseReceiveDir() {
-    QString start = receiveDirEdit_->text();
-    if (start.isEmpty()) start = QDir::homePath();
-    QString dir = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("选择接收文件夹"), start);
-    if (!dir.isEmpty()) receiveDirEdit_->setText(dir);
+void MainWindow::onLocalPathChanged(const QString& path) {
+    config_.receiveDir = path.toStdString();
+    saveConfig();
+    if (app_.isRunning() && app_.isConnected()) {
+        app_.notifyPathSync();
+    }
 }
 
 void MainWindow::onToggleAutoStart(bool enabled) {
@@ -479,6 +493,14 @@ void MainWindow::onRemoteLayoutChanged(ScreenLayout layout) {
     layoutWidget_->setLayout(layout);
     config_.layout = layoutToString(layout);
     saveConfig();
+}
+
+void MainWindow::onRemoteReceiveDirChanged(const QString& dir) {
+    if (dir.isEmpty()) {
+        remotePathCombo_->setPath(QStringLiteral("%TEMP%\\ZeroBorders（对端默认）"));
+    } else {
+        remotePathCombo_->setPath(dir);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -579,8 +601,9 @@ void MainWindow::toggleVisible() {
 
 void MainWindow::onIncomingOffer(quint64 id, const QStringList& files, quint64 total) {
     double mb = total / (1024.0 * 1024.0);
-    QString dirText = QString::fromStdString(config_.receiveDir.empty()
-        ? "%TEMP%\\ZeroBorders" : config_.receiveDir);
+    QString dirText = localPathCombo_->path().isEmpty()
+        ? QStringLiteral("%TEMP%\\ZeroBorders")
+        : localPathCombo_->path();
     QString text = QStringLiteral("收到文件传输请求：\n\n%1 个文件，共 %2 MB\n\n"
                                   "保存到：%3\n\n是否接收？")
         .arg(files.size())

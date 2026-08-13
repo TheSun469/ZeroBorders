@@ -3,6 +3,7 @@
 #include "../App.h"
 #include "../config/AppConfig.h"
 #include "DeviceLayoutWidget.h"
+#include "PathComboBox.h"
 
 #include <QMainWindow>
 #include <QSystemTrayIcon>
@@ -36,10 +37,11 @@ private slots:
     void onStartStop();
     void onBrowseFiles();
     void onSendFiles();
-    void onBrowseReceiveDir();
+    void onLocalPathChanged(const QString& path);
     void onToggleAutoStart(bool enabled);
     void onLayoutChanged(ScreenLayout layout);
     void onRemoteLayoutChanged(ScreenLayout layout);
+    void onRemoteReceiveDirChanged(const QString& dir);
     void onTrayActivated(QSystemTrayIcon::ActivationReason reason);
     void onShowWindow();
     void onQuitApp();
@@ -79,8 +81,6 @@ private:
 
     // --- Settings group ---
     QGroupBox* settingsGroup_ = nullptr;
-    QLineEdit* receiveDirEdit_ = nullptr;
-    QPushButton* browseReceiveBtn_ = nullptr;
     QCheckBox* autoStartCheck_ = nullptr;
     QCheckBox* minimizeToTrayCheck_ = nullptr;
 
@@ -90,6 +90,10 @@ private:
 
     // --- File transfer group ---
     QGroupBox* transferGroup_ = nullptr;
+    // Path row: left = local receive dir, right = remote receive dir
+    PathComboBox* localPathCombo_ = nullptr;
+    PathComboBox* remotePathCombo_ = nullptr;
+    // File list and buttons
     QListWidget* fileList_ = nullptr;
     QPushButton* addFilesBtn_ = nullptr;
     QPushButton* clearFilesBtn_ = nullptr;

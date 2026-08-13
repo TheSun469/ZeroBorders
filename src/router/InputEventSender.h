@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/Event.h"
+#include "../core/Log.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -55,6 +56,10 @@ public:
     }
 
 private:
+    static void logErr(const char* where, const char* what) {
+        ZB_LOG_ERROR("{}: {}", where, what);
+    }
+
     void run() {
         std::deque<InputEvent> localQueue;
         InputEvent moveEvent{};
@@ -85,11 +90,27 @@ private:
             // before a button press ensures the cursor reaches the target
             // before the click is injected on the remote side.
             if (hasMove) {
-                if (sendCb_) sendCb_(moveEvent);
+                if (sendCb_) {
+                    try {
+                        sendCb_(moveEvent);
+                    } catch (const std::exception& e) {
+                        logErr("Input sender move callback", e.what());
+                    } catch (...) {
+                        logErr("Input sender move callback", "unknown");
+                    }
+                }
                 hasMove = false;
             }
             for (const auto& ev : localQueue) {
-                if (sendCb_) sendCb_(ev);
+                if (sendCb_) {
+                    try {
+                        sendCb_(ev);
+                    } catch (const std::exception& e) {
+                        logErr("Input sender callback", e.what());
+                    } catch (...) {
+                        logErr("Input sender callback", "unknown");
+                    }
+                }
             }
             localQueue.clear();
         }

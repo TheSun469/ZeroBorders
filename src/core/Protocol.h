@@ -21,6 +21,7 @@ enum class MsgType : uint8_t {
     Pong             = 0x07,
     Goodbye          = 0x08,
     LayoutSync       = 0x09,  // 屏幕相对布局变更（双向同步）
+    PathSync         = 0x0A,  // 接收目录路径同步（双向交换）
 
     ClipboardText    = 0x10,
     ClipboardNotify  = 0x11,
@@ -148,6 +149,16 @@ struct LayoutSyncMsg {
 
 std::vector<uint8_t> serializeLayoutSync(const LayoutSyncMsg& m);
 bool parseLayoutSync(const std::vector<uint8_t>& d, LayoutSyncMsg& out);
+
+// ---- Path sync ----
+// Sent over the control channel to exchange the receive directory path
+// between peers, so each side can display where files will land on the remote.
+struct PathSyncMsg {
+    std::string receiveDir;  // UTF-8 path, empty = using default temp dir
+};
+
+std::vector<uint8_t> serializePathSync(const PathSyncMsg& m);
+bool parsePathSync(const std::vector<uint8_t>& d, PathSyncMsg& out);
 
 // ---- Clipboard serialization (Phase 4) ----
 

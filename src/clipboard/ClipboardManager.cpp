@@ -224,7 +224,15 @@ void ClipboardManager::onChangeDetected() {
     }
     ZB_LOG_INFO("Local clipboard changed: format={}, digest={:.8}",
                 fmtName, tokenToHex(content.digest));
-    if (callback_) callback_(content);
+    if (callback_) {
+        try {
+            callback_(content);
+        } catch (const std::exception& e) {
+            ZB_LOG_ERROR("Clipboard change callback exception: {}", e.what());
+        } catch (...) {
+            ZB_LOG_ERROR("Clipboard change callback unknown exception");
+        }
+    }
 }
 
 void ClipboardManager::syncNow() {
@@ -233,7 +241,13 @@ void ClipboardManager::syncNow() {
     if (!readLocal(content)) return;
     if (isEcho(content.digest)) return;
     ZB_LOG_INFO("Initial clipboard sync on connect");
-    callback_(content);
+    try {
+        callback_(content);
+    } catch (const std::exception& e) {
+        ZB_LOG_ERROR("Clipboard sync callback exception: {}", e.what());
+    } catch (...) {
+        ZB_LOG_ERROR("Clipboard sync callback unknown exception");
+    }
 }
 
 bool ClipboardManager::readLocal(ClipboardContent& out) {

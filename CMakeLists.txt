@@ -22,12 +22,20 @@ set(FETCHCONTENT_QUIET OFF)
 include(FetchContent)
 
 # nlohmann/json (header-only) - used by UDP discovery and config
-FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.3
-)
-FetchContent_MakeAvailable(nlohmann_json)
+# Prefer local copy in third_party/, fall back to FetchContent from Git.
+if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/nlohmann/json.hpp")
+    add_library(nlohmann_json INTERFACE)
+    target_include_directories(nlohmann_json INTERFACE ${CMAKE_SOURCE_DIR}/third_party)
+    add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)
+    message(STATUS "Using local nlohmann/json from third_party/")
+else()
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.3
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+endif()
 
 # Qt 6 (Widgets + Network) - GUI framework
 # Qt is installed locally (not fetched); point CMAKE_PREFIX_PATH at its CMake config.

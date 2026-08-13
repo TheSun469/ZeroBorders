@@ -196,6 +196,9 @@ void NetworkClient::stop() {
     running_ = false;
     reconnecting_ = false;
     ready_ = false;
+    // Wake up the reconnect thread so it exits immediately instead of
+    // making stop() block on join() for up to 30 seconds.
+    reconnectCv_.notify_all();
     if (cleanupThread_.joinable()) cleanupThread_.join();
     teardownImpl("stopping", false);
     if (reconnectThread_.joinable()) reconnectThread_.join();
@@ -212,7 +215,8 @@ void NetworkClient::postTeardown(const std::string& reason, bool retry) {
 }
 
 void NetworkClient::teardownImpl(const std::string& reason, bool retry) {
-    if (ready_.exchange(false)) {
+    bool wasReady = ready_.exchange(false);
+    if (wasReady) {
         ZB_LOG_WARN("Session lost: {}", reason);
     } else {
         ZB_LOG_INFO("Client teardown: {}", reason);
@@ -233,7 +237,11 @@ void NetworkClient::teardownImpl(const std::string& reason, bool retry) {
     ctrlState_ = CtrlState::Closed;
     dataState_ = DataState::Closed;
 
-    if (onDisconnect_) onDisconnect_(reason);
+    // Only notify the app for a real session loss. This prevents double-
+    // firing when stop() runs a final teardown after the cleanup thread
+    // already notified, and avoids noise from failed reconnect attempts
+    // (which scheduleReconnect handles silently).
+    if (wasReady && onDisconnect_) onDisconnect_(reason);
 
     if (retry && running_.load() && !reconnecting_.exchange(true)) {
         scheduleReconnect();
@@ -246,8 +254,13 @@ void NetworkClient::scheduleReconnect() {
         // Try direct reconnect to last known host with exponential backoff.
         while (running_.load() && !ready_.load()) {
             ZB_LOG_INFO("Reconnecting to {} in {}s...", lastHost_, reconnectDelaySec_);
-            std::this_thread::sleep_for(std::chrono::seconds(reconnectDelaySec_));
-            if (!running_.load()) break;
+            {
+                std::unique_lock<std::mutex> lk(reconnectMtx_);
+                reconnectCv_.wait_for(lk,
+                    std::chrono::seconds(reconnectDelaySec_),
+                    [this] { return !running_.load() || ready_.load(); });
+            }
+            if (!running_.load() || ready_.load()) break;
             if (tryConnect(lastHost_, 5000)) {
                 reconnecting_ = false;
                 return;
@@ -259,13 +272,23 @@ void NetworkClient::scheduleReconnect() {
 }
 
 void NetworkClient::sendControl(MsgType t, const std::vector<uint8_t>& p) {
-    std::lock_guard<std::mutex> lk(stateMutex_);
-    if (ctrl_) ctrl_->send(t, p);
+    // Copy under the lock, send without holding it. See NetworkServer for the
+    // deadlock rationale (send() -> fireDisconnect -> postTeardown -> join).
+    std::shared_ptr<TcpTransport> ctrl;
+    {
+        std::lock_guard<std::mutex> lk(stateMutex_);
+        ctrl = ctrl_;
+    }
+    if (ctrl) ctrl->send(t, p);
 }
 
 void NetworkClient::sendData(MsgType t, const std::vector<uint8_t>& p) {
-    std::lock_guard<std::mutex> lk(stateMutex_);
-    if (data_) data_->send(t, p);
+    std::shared_ptr<TcpTransport> data;
+    {
+        std::lock_guard<std::mutex> lk(stateMutex_);
+        data = data_;
+    }
+    if (data) data->send(t, p);
 }
 
 } // namespace zb

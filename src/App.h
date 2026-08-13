@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config/AppConfig.h"
+#include "core/Protocol.h"
 #include "core/ScreenLayout.h"
 #include "network/UdpDiscovery.h"
 #include "router/InputEventSender.h"
@@ -8,6 +9,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
 
 #include <atomic>
 #include <cstdint>
@@ -71,6 +73,15 @@ public:
     // Notify peer of updated local receive directory (called when user edits path).
     void notifyPathSync();
 
+    // Request the peer to list the contents of a directory. The result is
+    // delivered asynchronously via the remoteDirListed signal.
+    void requestRemoteDirList(const std::string& path);
+
+    // Request the peer to send the specified files back to us (download).
+    // destDir is where files should be saved on our side.
+    void requestRemoteFiles(const std::vector<std::string>& remotePaths,
+                            const std::string& destDir);
+
     // File transfer (sender). Returns 0 on failure.
     uint64_t sendFiles(const std::vector<std::string>& paths);
 
@@ -95,6 +106,9 @@ signals:
     void layoutChanged(ScreenLayout layout);
     // 对端通过 PathSync 推送了其接收目录路径。
     void remoteReceiveDirChanged(const QString& dir);
+    // 对端返回了目录列表。entries 是 QVariantMap 列表，每项包含:
+    //   name (QString), size (quint64), isDir (bool), mtime (QDateTime)
+    void remoteDirListed(const QString& path, bool ok, const QVariantList& entries);
 
 private:
     void resetSession();
@@ -117,6 +131,15 @@ private:
     void sendPathSync();
     // 应用来自对端的 PathSync。
     void applyRemotePath(const std::string& dir);
+
+    // 处理对端发来的目录列表请求/响应。
+    void handleListDirRequest(const std::vector<uint8_t>& payload);
+    void handleListDirResponse(const std::vector<uint8_t>& payload);
+    // 处理对端发来的文件下载请求。
+    void handleFilePullRequest(const std::vector<uint8_t>& payload);
+    // 扫描本地目录并返回条目（UTF-8 路径安全）。
+    static std::vector<DirEntry> scanLocalDirectory(const std::string& dirUtf8,
+                                                    bool& ok);
 
     // Internal launchers used by startServer/startClient/startAuto.
     void launchServer(const AppConfig& cfg, bool enableDiscovery);
@@ -165,6 +188,15 @@ private:
     // received files into clipboard on completion).
     std::mutex clipboardTransferMutex_;
     std::unordered_map<uint64_t, std::string> clipboardTransfers_;
+
+    // Monotonic counter for ListDir request correlation.
+    std::atomic<uint32_t> listDirReqId_{0};
+    // Monotonic counter for FilePull request correlation.
+    std::atomic<uint32_t> pullReqId_{0};
+    // When we initiated a pull (download), the next FileOffer should be
+    // auto-accepted to this directory on our side.
+    std::mutex pendingPullMutex_;
+    std::string pendingPullDestDir_;
 };
 
 } // namespace zb

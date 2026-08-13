@@ -276,6 +276,82 @@ bool parsePathSync(const std::vector<uint8_t>& d, PathSyncMsg& out) {
     return r.string(out.receiveDir);
 }
 
+// ---- Remote directory listing ----
+
+std::vector<uint8_t> serializeListDirRequest(const ListDirRequestMsg& m) {
+    Writer w;
+    w.u32(m.requestId);
+    w.string(m.path);
+    return w.take();
+}
+
+bool parseListDirRequest(const std::vector<uint8_t>& d, ListDirRequestMsg& out) {
+    Reader r(d);
+    out.requestId = r.u32();
+    if (!r.string(out.path)) return false;
+    return r.ok();
+}
+
+std::vector<uint8_t> serializeListDirResponse(const ListDirResponseMsg& m) {
+    Writer w;
+    w.u32(m.requestId);
+    w.string(m.path);
+    w.u8(m.result);
+    w.u32(static_cast<uint32_t>(m.entries.size()));
+    for (const auto& e : m.entries) {
+        w.string(e.name);
+        w.u64(e.size);
+        w.u8(e.isDirectory ? 1 : 0);
+        w.u64(static_cast<uint64_t>(e.mtime));
+    }
+    return w.take();
+}
+
+bool parseListDirResponse(const std::vector<uint8_t>& d, ListDirResponseMsg& out) {
+    Reader r(d);
+    out.requestId = r.u32();
+    if (!r.string(out.path)) return false;
+    out.result = r.u8();
+    uint32_t count = r.u32();
+    out.entries.clear();
+    out.entries.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        DirEntry e;
+        if (!r.string(e.name)) return false;
+        e.size = r.u64();
+        e.isDirectory = r.u8() != 0;
+        e.mtime = static_cast<int64_t>(r.u64());
+        out.entries.push_back(std::move(e));
+    }
+    return r.ok();
+}
+
+// ---- File pull request ----
+
+std::vector<uint8_t> serializeFilePullRequest(const FilePullRequestMsg& m) {
+    Writer w;
+    w.u32(m.requestId);
+    w.string(m.destDir);
+    w.u32(static_cast<uint32_t>(m.paths.size()));
+    for (const auto& p : m.paths) w.string(p);
+    return w.take();
+}
+
+bool parseFilePullRequest(const std::vector<uint8_t>& d, FilePullRequestMsg& out) {
+    Reader r(d);
+    out.requestId = r.u32();
+    if (!r.string(out.destDir)) return false;
+    uint32_t count = r.u32();
+    out.paths.clear();
+    out.paths.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        std::string p;
+        if (!r.string(p)) return false;
+        out.paths.push_back(std::move(p));
+    }
+    return r.ok();
+}
+
 // ---- Clipboard serialization ----
 
 std::vector<uint8_t> serializeClipboardText(const ClipboardTextMsg& m) {

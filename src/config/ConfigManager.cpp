@@ -55,6 +55,7 @@ bool ConfigManager::load(AppConfig& out) const {
         if (j.contains("role")) out.role = static_cast<AppConfig::Role>(j["role"].get<int>());
         if (j.contains("rolePreference")) out.rolePreference = j["rolePreference"].get<int>();
         if (j.contains("pairingCode")) out.pairingCode = j["pairingCode"].get<std::string>();
+        if (j.contains("username")) out.username = j["username"].get<std::string>();
         if (j.contains("serverName")) out.serverName = j["serverName"].get<std::string>();
         if (j.contains("host")) out.host = j["host"].get<std::string>();
         if (j.contains("layout")) out.layout = j["layout"].get<std::string>();
@@ -79,6 +80,7 @@ bool ConfigManager::save(const AppConfig& cfg) const {
         j["role"] = static_cast<int>(cfg.role);
         j["rolePreference"] = cfg.rolePreference;
         j["pairingCode"] = cfg.pairingCode;
+        j["username"] = cfg.username;
         j["serverName"] = cfg.serverName;
         j["host"] = cfg.host;
         j["layout"] = cfg.layout;

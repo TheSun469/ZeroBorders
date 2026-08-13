@@ -22,6 +22,9 @@ enum class MsgType : uint8_t {
     Goodbye          = 0x08,
     LayoutSync       = 0x09,  // 屏幕相对布局变更（双向同步）
     PathSync         = 0x0A,  // 接收目录路径同步（双向交换）
+    ListDirRequest   = 0x0B,  // 请求列出对端指定目录
+    ListDirResponse  = 0x0C,  // 返回目录条目列表
+    FilePullRequest  = 0x0D,  // 请求对端发送指定文件（下载）
 
     ClipboardText    = 0x10,
     ClipboardNotify  = 0x11,
@@ -159,6 +162,46 @@ struct PathSyncMsg {
 
 std::vector<uint8_t> serializePathSync(const PathSyncMsg& m);
 bool parsePathSync(const std::vector<uint8_t>& d, PathSyncMsg& out);
+
+// ---- Remote directory listing ----
+// Used by the file browser UI to display the remote receive directory.
+struct DirEntry {
+    std::string name;        // file or folder name (no path)
+    uint64_t size = 0;       // file size in bytes (0 for directories)
+    bool isDirectory = false;
+    int64_t mtime = 0;       // modification time as Unix timestamp (seconds)
+};
+
+struct ListDirRequestMsg {
+    uint32_t requestId = 0;  // echoed in response for correlation
+    std::string path;        // UTF-8 path to list (empty = default receive dir)
+};
+
+struct ListDirResponseMsg {
+    uint32_t requestId = 0;
+    std::string path;        // echoed path (may be resolved if empty was sent)
+    uint8_t result = 0;      // 0 = ok, 1 = error
+    std::vector<DirEntry> entries;
+};
+
+std::vector<uint8_t> serializeListDirRequest(const ListDirRequestMsg& m);
+bool parseListDirRequest(const std::vector<uint8_t>& d, ListDirRequestMsg& out);
+
+std::vector<uint8_t> serializeListDirResponse(const ListDirResponseMsg& m);
+bool parseListDirResponse(const std::vector<uint8_t>& d, ListDirResponseMsg& out);
+
+// ---- File pull request (remote → local download) ----
+// Sent when the user selects files in the remote browser and clicks
+// "download". The peer that receives this message acts as the sender and
+// initiates a normal file transfer back to the requester.
+struct FilePullRequestMsg {
+    uint32_t requestId = 0;
+    std::string destDir;                 // UTF-8 path on requester to save into
+    std::vector<std::string> paths;      // UTF-8 full paths on the sender side
+};
+
+std::vector<uint8_t> serializeFilePullRequest(const FilePullRequestMsg& m);
+bool parseFilePullRequest(const std::vector<uint8_t>& d, FilePullRequestMsg& out);
 
 // ---- Clipboard serialization (Phase 4) ----
 

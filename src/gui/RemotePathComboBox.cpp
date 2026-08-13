@@ -1,60 +1,63 @@
-#include "PathComboBox.h"
+#include "RemotePathComboBox.h"
 
-#include <QLineEdit>
-#include <QFileSystemModel>
-#include <QTreeView>
-#include <QHeaderView>
-#include <QDir>
 #include <QFrame>
-#include <QVBoxLayout>
 #include <QGuiApplication>
+#include <QHeaderView>
+#include <QLineEdit>
 #include <QScreen>
 #include <QSize>
+#include <QTreeView>
+#include <QVBoxLayout>
 
 namespace zb {
 
-PathComboBox::PathComboBox(QWidget* parent) : QComboBox(parent) {
+RemotePathComboBox::RemotePathComboBox(QWidget* parent) : QComboBox(parent) {
     setEditable(true);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    lineEdit()->setReadOnly(true);
+    setPlaceholderText(QStringLiteral("未连接"));
 
-    // 文件系统模型：仅目录，不含文件
-    model_ = new QFileSystemModel(this);
-    model_->setFilter(QDir::AllDirs | QDir::NoDotAndDotDot | QDir::Drives);
-    model_->setRootPath(QString());  // 整个文件系统
-
-    // 回车提交手输路径
-    connect(lineEdit(), &QLineEdit::returnPressed, this, &PathComboBox::onReturnPressed);
+    model_ = new RemoteDirTreeModel(this);
+    connect(model_, &RemoteDirTreeModel::fetchRequested,
+            this, &RemotePathComboBox::fetchRequested);
 }
 
-PathComboBox::~PathComboBox() {
+RemotePathComboBox::~RemotePathComboBox() {
     if (popup_) {
         popup_->hide();
         popup_->deleteLater();
     }
 }
 
-void PathComboBox::setPath(const QString& path) {
-    lineEdit()->setText(path);
+void RemotePathComboBox::setPath(const QString& path) {
+    QString display = path.isEmpty() ? QStringLiteral("我的电脑") : path;
+    lineEdit()->setText(display);
 }
 
-QString PathComboBox::path() const {
-    return lineEdit()->text().trimmed();
+QString RemotePathComboBox::path() const {
+    QString text = lineEdit()->text().trimmed();
+    if (text == QStringLiteral("我的电脑")) return QString();
+    return text;
 }
 
-void PathComboBox::setReadOnly(bool ro) {
+void RemotePathComboBox::setReadOnly(bool ro) {
     readOnly_ = ro;
-    lineEdit()->setReadOnly(ro);
+    lineEdit()->setReadOnly(true);  // 远程路径始终不可手动输入
+    setEnabled(!ro);
 }
 
-void PathComboBox::onReturnPressed() {
-    emit pathChanged(lineEdit()->text().trimmed());
+void RemotePathComboBox::setEntries(const QString& path,
+                                    const QVector<RemoteDirEntry>& entries) {
+    model_->setEntries(path, entries);
 }
 
-void PathComboBox::showPopup() {
+void RemotePathComboBox::clearTree() {
+    model_->clear();
+}
+
+void RemotePathComboBox::showPopup() {
     if (readOnly_) return;
 
-    // 首次调用时创建 popup（自定义 QFrame，不用 QComboBox 的 view 机制）
-    // 这样单击不会关闭弹出窗口，只有双击或按 ESC / 点击外部才关闭
     if (!popup_) {
         popup_ = new QFrame(nullptr, Qt::Popup);
         popup_->setFrameShape(QFrame::StyledPanel);
@@ -65,24 +68,20 @@ void PathComboBox::showPopup() {
 
         tree_ = new QTreeView(popup_);
         tree_->setModel(model_);
-        tree_->setRootIndex(model_->index(QString()));  // 根 = 所有驱动器
         tree_->setHeaderHidden(true);
         tree_->setRootIsDecorated(true);
         tree_->setItemsExpandable(true);
-        tree_->setSortingEnabled(true);
-        tree_->sortByColumn(0, Qt::AscendingOrder);
         tree_->setUniformRowHeights(true);
-        tree_->setExpandsOnDoubleClick(false);  // 双击我们自己处理
+        tree_->setExpandsOnDoubleClick(false);
         tree_->setIconSize(QSize(14, 14));
+        tree_->setRootIsDecorated(true);
         tree_->setIndentation(14);
-        for (int c = 1; c < model_->columnCount(); ++c)
-            tree_->setColumnHidden(c, true);
 
-        // 单击目录：更新路径文本，不关闭 popup（允许继续展开浏览）
+        // 单击目录：更新路径文本，不关闭 popup
         connect(tree_, &QTreeView::clicked, this, [this](const QModelIndex& idx) {
             if (!idx.isValid()) return;
             QString p = model_->filePath(idx);
-            lineEdit()->setText(p);
+            setPath(p);
             emit pathChanged(p);
         });
 
@@ -90,7 +89,7 @@ void PathComboBox::showPopup() {
         connect(tree_, &QTreeView::doubleClicked, this, [this](const QModelIndex& idx) {
             if (!idx.isValid()) return;
             QString p = model_->filePath(idx);
-            lineEdit()->setText(p);
+            setPath(p);
             emit pathChanged(p);
             popup_->hide();
         });
@@ -98,34 +97,32 @@ void PathComboBox::showPopup() {
         layout->addWidget(tree_);
     }
 
-    // 确保根目录已加载（QFileSystemModel 是懒加载的）
-    QModelIndex rootIdx = model_->index(QString());
-    if (model_->canFetchMore(rootIdx)) {
-        model_->fetchMore(rootIdx);
+    // 首次打开时请求根目录（驱动器列表）
+    if (model_->canFetchMore(QModelIndex())) {
+        model_->fetchMore(QModelIndex());
     }
 
-    // 滚动到当前路径并展开父链
-    QString current = lineEdit()->text().trimmed();
+    // 展开并定位到当前路径
+    QString current = path();
     if (!current.isEmpty()) {
-        QModelIndex idx = model_->index(current);
+        QModelIndex idx = model_->indexForPath(current);
         if (idx.isValid()) {
             tree_->setCurrentIndex(idx);
             tree_->scrollTo(idx, QAbstractItemView::PositionAtCenter);
-            QModelIndex parent = idx.parent();
-            while (parent.isValid()) {
-                tree_->expand(parent);
-                parent = parent.parent();
+            // 展开所有祖先
+            QModelIndex p = idx.parent();
+            while (p.isValid()) {
+                tree_->expand(p);
+                p = p.parent();
             }
         }
     }
 
-    // 定位 popup 到控件下方
     QRect btnRect = this->rect();
     QPoint bottomLeft = this->mapToGlobal(btnRect.bottomLeft());
     int popupWidth = qMax(this->width(), 420);
     int popupHeight = 320;
 
-    // 避免超出屏幕
     QScreen* screen = QGuiApplication::screenAt(bottomLeft);
     if (!screen) screen = QGuiApplication::primaryScreen();
     if (screen) {

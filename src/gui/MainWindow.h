@@ -3,7 +3,7 @@
 #include "../App.h"
 #include "../config/AppConfig.h"
 #include "DeviceLayoutWidget.h"
-#include "PathComboBox.h"
+#include "FileBrowserWidget.h"
 
 #include <QMainWindow>
 #include <QSystemTrayIcon>
@@ -21,6 +21,8 @@ class QListWidget;
 class QGroupBox;
 class QMenu;
 class QAction;
+class QToolButton;
+class QSplitter;
 
 namespace zb {
 
@@ -35,9 +37,12 @@ protected:
 
 private slots:
     void onStartStop();
-    void onBrowseFiles();
-    void onSendFiles();
+    void onSendSelected();
+    void onDownloadSelected();
+    void onRefreshRemote();
     void onLocalPathChanged(const QString& path);
+    void onNavigateRemote(const QString& path);
+    void onRemoteDirListed(const QString& path, bool ok, const QVariantList& entries);
     void onToggleAutoStart(bool enabled);
     void onLayoutChanged(ScreenLayout layout);
     void onRemoteLayoutChanged(ScreenLayout layout);
@@ -66,6 +71,7 @@ private:
     void appendLog(const QString& line, const QString& tag);
     void updateProgress(quint64 id, quint64 transferred, quint64 total);
     void toggleVisible();
+    void setLayoutCollapsed(bool collapsed);
 
     App app_;
     AppConfig config_;
@@ -73,6 +79,7 @@ private:
     // --- Connection group ---
     QGroupBox* connGroup_ = nullptr;
     QLineEdit* codeEdit_ = nullptr;
+    QLineEdit* usernameEdit_ = nullptr;
     QComboBox* rolePrefCombo_ = nullptr;
     QPushButton* startBtn_ = nullptr;
     QLabel* statusLabel_ = nullptr;
@@ -87,19 +94,20 @@ private:
     // --- Screen layout group ---
     QGroupBox* layoutGroup_ = nullptr;
     DeviceLayoutWidget* layoutWidget_ = nullptr;
+    QToolButton* layoutCollapseBtn_ = nullptr;
+    bool layoutCollapsed_ = false;
+    int savedLayoutHeight_ = 140;  // remembered height for restore
 
     // --- File transfer group ---
     QGroupBox* transferGroup_ = nullptr;
-    // Path row: left = local receive dir, right = remote receive dir
-    PathComboBox* localPathCombo_ = nullptr;
-    PathComboBox* remotePathCombo_ = nullptr;
-    // File list and buttons
-    QListWidget* fileList_ = nullptr;
-    QPushButton* addFilesBtn_ = nullptr;
-    QPushButton* clearFilesBtn_ = nullptr;
-    QPushButton* sendBtn_ = nullptr;
-    QProgressBar* progressBar_ = nullptr;
-    QLabel* progressLabel_ = nullptr;
+    // Left = local filesystem browser, right = remote receive directory.
+    FileBrowserWidget* localBrowser_ = nullptr;
+    FileBrowserWidget* remoteBrowser_ = nullptr;
+    QPushButton* refreshRemoteBtn_ = nullptr;
+
+    // Track which side initiated the current transfer.
+    // 0 = none, 1 = local (upload), 2 = remote (download)
+    int activeSide_ = 0;
 
     // --- Log ---
     QPlainTextEdit* logView_ = nullptr;
@@ -113,7 +121,10 @@ private:
     QAction* quitAction_ = nullptr;
     bool quitting_ = false;
 
+    QSplitter* mainSplitter_ = nullptr;
+
     quint64 currentTransferId_ = 0;
+    bool transferIncoming_ = false;  // true = incoming transfer (show on local)
 };
 
 } // namespace zb

@@ -12,16 +12,47 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <random>
 
+#include <QDateTime>
 #include <QTimer>
+#include <QVariantMap>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 
+namespace fs = std::filesystem;
+
 namespace zb {
+
+namespace {
+
+// UTF-8 ↔ UTF-16 conversion helpers (Windows paths are UTF-16).
+std::wstring utf8ToWide(const std::string& s) {
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(),
+                                  static_cast<int>(s.size()), nullptr, 0);
+    std::wstring out(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                        out.data(), len);
+    return out;
+}
+
+std::string wideToUtf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.data(),
+                                  static_cast<int>(w.size()),
+                                  nullptr, 0, nullptr, nullptr);
+    std::string out(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                        out.data(), len, nullptr, nullptr);
+    return out;
+}
+
+} // namespace
 
 App::App(QObject* parent) : QObject(parent) {}
 
@@ -140,6 +171,220 @@ void App::applyRemotePath(const std::string& dir) {
     emit remoteReceiveDirChanged(QString::fromStdString(dir));
 }
 
+// ---------------------------------------------------------------------------
+// Remote directory listing
+// ---------------------------------------------------------------------------
+
+void App::requestRemoteDirList(const std::string& path) {
+    if (!running_.load() || !connected_.load()) return;
+    ListDirRequestMsg msg;
+    msg.requestId = ++listDirReqId_;
+    msg.path = path;
+    auto payload = serializeListDirRequest(msg);
+    if (isServer_.load()) {
+        if (server_ && server_->isReady())
+            server_->sendControl(MsgType::ListDirRequest, payload);
+    } else {
+        if (client_ && client_->isReady())
+            client_->sendControl(MsgType::ListDirRequest, payload);
+    }
+}
+
+std::vector<DirEntry> App::scanLocalDirectory(const std::string& dirUtf8, bool& ok) {
+    std::vector<DirEntry> result;
+    ok = false;
+
+    // Convert UTF-8 → UTF-16 for Windows filesystem APIs.
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, dirUtf8.c_str(),
+                                   static_cast<int>(dirUtf8.size()),
+                                   nullptr, 0);
+    if (wlen <= 0) return result;
+    std::wstring wpath(wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, dirUtf8.c_str(),
+                        static_cast<int>(dirUtf8.size()),
+                        wpath.data(), wlen);
+
+    std::error_code ec;
+    auto it = fs::directory_iterator(wpath, ec);
+    if (ec) {
+        ZB_LOG_WARN("scanLocalDirectory open [{}] failed: {}",
+                    dirUtf8, ec.message());
+        return result;
+    }
+
+    for (const auto& entry : it) {
+        DirEntry de;
+        de.name = wideToUtf8(entry.path().filename().wstring());
+        if (de.name.empty()) continue;
+        std::error_code ecStat;
+        de.isDirectory = entry.is_directory(ecStat);
+        if (!de.isDirectory) {
+            auto sz = entry.file_size(ecStat);
+            de.size = ecStat ? 0 : static_cast<uint64_t>(sz);
+        }
+        auto ftime = entry.last_write_time(ecStat);
+        if (!ecStat) {
+            // Convert file_time_type to Unix timestamp.
+            auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(
+                ftime - fs::file_time_type::clock::now()
+                + std::chrono::system_clock::now());
+            de.mtime = static_cast<int64_t>(sctp.time_since_epoch().count());
+        }
+        result.push_back(std::move(de));
+    }
+
+    // Sort: directories first, then files; case-insensitive by name.
+    std::sort(result.begin(), result.end(),
+              [](const DirEntry& a, const DirEntry& b) {
+                  if (a.isDirectory != b.isDirectory) return a.isDirectory;
+                  return _wcsicmp(utf8ToWide(a.name).c_str(),
+                                  utf8ToWide(b.name).c_str()) < 0;
+              });
+
+    ok = true;
+    return result;
+}
+
+void App::handleListDirRequest(const std::vector<uint8_t>& payload) {
+    ListDirRequestMsg req;
+    if (!parseListDirRequest(payload, req)) return;
+
+    ListDirResponseMsg resp;
+    resp.requestId = req.requestId;
+
+    // Empty path means "root" — list all available drives on Windows.
+    std::string target = req.path;
+    if (target.empty()) {
+        // Enumerate all logical drives.
+        wchar_t drives[256];
+        DWORD len = GetLogicalDriveStringsW(256, drives);
+        std::vector<DirEntry> entries;
+        if (len > 0 && len < 256) {
+            const wchar_t* p = drives;
+            while (*p) {
+                std::wstring ws(p);
+                DirEntry de;
+                de.name = wideToUtf8(ws);  // e.g. "C:\"
+                de.isDirectory = true;
+                de.size = 0;
+                de.mtime = 0;
+                entries.push_back(std::move(de));
+                p += ws.size() + 1;
+            }
+        }
+        resp.path = "";
+        resp.entries = std::move(entries);
+        resp.result = 0;
+
+        auto out = serializeListDirResponse(resp);
+        if (isServer_.load()) {
+            if (server_ && server_->isReady())
+                server_->sendControl(MsgType::ListDirResponse, out);
+        } else {
+            if (client_ && client_->isReady())
+                client_->sendControl(MsgType::ListDirResponse, out);
+        }
+        return;
+    }
+
+    resp.path = target;
+
+    bool ok = false;
+    resp.entries = scanLocalDirectory(target, ok);
+    resp.result = ok ? 0 : 1;
+
+    auto out = serializeListDirResponse(resp);
+    if (isServer_.load()) {
+        if (server_ && server_->isReady())
+            server_->sendControl(MsgType::ListDirResponse, out);
+    } else {
+        if (client_ && client_->isReady())
+            client_->sendControl(MsgType::ListDirResponse, out);
+    }
+}
+
+void App::handleListDirResponse(const std::vector<uint8_t>& payload) {
+    ListDirResponseMsg resp;
+    if (!parseListDirResponse(payload, resp)) return;
+
+    QVariantList list;
+    for (const auto& e : resp.entries) {
+        QVariantMap m;
+        m[QStringLiteral("name")] = QString::fromStdString(e.name);
+        m[QStringLiteral("size")] = static_cast<qulonglong>(e.size);
+        m[QStringLiteral("isDir")] = e.isDirectory;
+        // Convert Unix seconds to QDateTime.
+        QDateTime dt;
+        dt.setSecsSinceEpoch(static_cast<qint64>(e.mtime));
+        m[QStringLiteral("mtime")] = dt;
+        list.append(m);
+    }
+
+    emit remoteDirListed(QString::fromStdString(resp.path),
+                         resp.result == 0, list);
+}
+
+void App::requestRemoteFiles(const std::vector<std::string>& remotePaths,
+                             const std::string& destDir) {
+    if (!running_.load() || !connected_.load()) return;
+    FilePullRequestMsg msg;
+    msg.requestId = ++pullReqId_;
+    msg.destDir = destDir;
+    msg.paths = remotePaths;
+    auto payload = serializeFilePullRequest(msg);
+    // Remember destination so the incoming FileOffer auto-accepts to it.
+    {
+        std::lock_guard<std::mutex> lk(pendingPullMutex_);
+        pendingPullDestDir_ = destDir;
+    }
+    if (isServer_.load()) {
+        if (server_ && server_->isReady())
+            server_->sendControl(MsgType::FilePullRequest, payload);
+    } else {
+        if (client_ && client_->isReady())
+            client_->sendControl(MsgType::FilePullRequest, payload);
+    }
+    ZB_LOG_INFO("Pull request sent: {} file(s) -> {}", remotePaths.size(), destDir);
+}
+
+void App::handleFilePullRequest(const std::vector<uint8_t>& payload) {
+    FilePullRequestMsg req;
+    if (!parseFilePullRequest(payload, req)) return;
+
+    ZB_LOG_INFO("Received pull request for {} file(s)", req.paths.size());
+
+    // Validate that paths exist locally before initiating the send.
+    std::vector<std::string> validPaths;
+    validPaths.reserve(req.paths.size());
+    for (const auto& p : req.paths) {
+        std::wstring wp;
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, p.c_str(),
+                                       static_cast<int>(p.size()), nullptr, 0);
+        if (wlen > 0) {
+            wp.resize(wlen);
+            MultiByteToWideChar(CP_UTF8, 0, p.c_str(),
+                                static_cast<int>(p.size()), wp.data(), wlen);
+        }
+        std::error_code ec;
+        if (fs::exists(wp, ec)) {
+            validPaths.push_back(p);
+        } else {
+            ZB_LOG_WARN("Pull request path not found: {}", p);
+        }
+    }
+
+    if (validPaths.empty()) {
+        ZB_LOG_WARN("Pull request has no valid paths, ignoring");
+        return;
+    }
+
+    // Act as sender: initiate a normal file transfer back to the requester.
+    uint64_t id = fileTransfer_ ? fileTransfer_->sendFiles(validPaths) : 0;
+    if (id == 0) {
+        ZB_LOG_WARN("Failed to start send for pull request");
+    }
+}
+
 void App::startServer(const AppConfig& cfg) {
     if (running_.load()) return;
     launchServer(cfg, true);
@@ -165,7 +410,7 @@ void App::launchServer(const AppConfig& cfg, bool enableDiscovery) {
     localW_ = static_cast<uint32_t>(GetSystemMetrics(SM_CXSCREEN));
     localH_ = static_cast<uint32_t>(GetSystemMetrics(SM_CYSCREEN));
 
-    TokenHash token = sha256(cfg.pairingCode);
+    TokenHash token = sha256(cfg.pairingCode + "|" + cfg.username);
 
     server_ = std::make_unique<NetworkServer>(token, name,
         cfg.controlPort, cfg.dataPort, cfg.udpPort);
@@ -198,6 +443,9 @@ void App::launchServer(const AppConfig& cfg, bool enableDiscovery) {
             // Exchange receive directory paths so each side can display
             // where files will land on the remote machine.
             sendPathSync();
+            // Request the peer's receive directory listing to populate
+            // the remote file browser.
+            requestRemoteDirList("");
         },
         [this](const std::string& reason) {
             setConnected(false);
@@ -233,7 +481,7 @@ void App::launchClient(const AppConfig& cfg, const std::string& host,
     config_ = cfg;
     layout_ = layoutFromString(cfg.layout);
 
-    TokenHash token = sha256(cfg.pairingCode);
+    TokenHash token = sha256(cfg.pairingCode + "|" + cfg.username);
 
     client_ = std::make_unique<NetworkClient>(token,
         cfg.controlPort, cfg.dataPort, cfg.udpPort);
@@ -255,6 +503,9 @@ void App::launchClient(const AppConfig& cfg, const std::string& host,
                       .arg(w.screenWidth).arg(w.screenHeight));
         // Sync local clipboard to the newly connected peer.
         if (clipboard_) clipboard_->syncNow();
+        // Exchange receive directory paths and request remote listing.
+        sendPathSync();
+        requestRemoteDirList("");
     };
     auto onDisconnect = [this](const std::string& reason) {
         bool wasConnected = connected_.exchange(false);
@@ -339,7 +590,8 @@ void App::startAuto(const AppConfig& cfg) {
     nodeId_ = rng();
     if (nodeId_ == 0) nodeId_ = 1;
 
-    TokenHash token = sha256(cfg.pairingCode);
+    // Combine pairing code + username for the token hash (double authentication).
+    TokenHash token = sha256(cfg.pairingCode + "|" + cfg.username);
 
     running_ = true;
     autoMode_ = true;
@@ -419,7 +671,7 @@ void App::restartAutoDiscovery() {
     setStatus(QStringLiteral("正在重新搜索对端..."));
 
     // Reuse the existing nodeId_ so role election is stable across reconnects.
-    TokenHash token = sha256(config_.pairingCode);
+    TokenHash token = sha256(config_.pairingCode + "|" + config_.username);
     autoDiscovery_ = std::make_unique<UdpDiscovery>();
     autoDiscovery_->startAuto(config_.udpPort, token, nodeId_, config_.rolePreference,
         [this](const std::string& peerIp, UdpDiscovery::AutoRole role) {
@@ -528,8 +780,21 @@ void App::wireFileTransferCallbacks() {
 
     // Incoming offers: forward to the UI as a queued signal so a confirmation
     // dialog can be shown. The UI calls acceptTransfer/rejectTransfer.
+    // Exception: if we initiated a pull (download), auto-accept silently.
     fileTransfer_->setIncomingOfferCallback(
         [this](uint64_t id, const std::vector<TransferEntry>& entries, uint64_t total) {
+            std::string pullDest;
+            {
+                std::lock_guard<std::mutex> lk(pendingPullMutex_);
+                pullDest = pendingPullDestDir_;
+                pendingPullDestDir_.clear();
+            }
+            if (!pullDest.empty()) {
+                // Auto-accept pull-initiated transfer without UI prompt.
+                onTransferOffer(id, total);
+                fileTransfer_->accept(id, pullDest);
+                return;
+            }
             QStringList names;
             names.reserve(static_cast<int>(entries.size()));
             for (const auto& e : entries) {
@@ -620,6 +885,12 @@ void App::wireServerCallbacks() {
             } else if (t == MsgType::PathSync) {
                 PathSyncMsg msg{};
                 if (parsePathSync(p, msg)) applyRemotePath(msg.receiveDir);
+            } else if (t == MsgType::ListDirRequest) {
+                handleListDirRequest(p);
+            } else if (t == MsgType::ListDirResponse) {
+                handleListDirResponse(p);
+            } else if (t == MsgType::FilePullRequest) {
+                handleFilePullRequest(p);
             }
         } catch (const std::exception& e) {
             ZB_LOG_ERROR("Server ctrl callback error: {}", e.what());
@@ -696,6 +967,12 @@ void App::wireClientCallbacks() {
             } else if (t == MsgType::PathSync) {
                 PathSyncMsg msg{};
                 if (parsePathSync(p, msg)) applyRemotePath(msg.receiveDir);
+            } else if (t == MsgType::ListDirRequest) {
+                handleListDirRequest(p);
+            } else if (t == MsgType::ListDirResponse) {
+                handleListDirResponse(p);
+            } else if (t == MsgType::FilePullRequest) {
+                handleFilePullRequest(p);
             }
         } catch (const std::exception& e) {
             ZB_LOG_ERROR("Client ctrl callback error: {}", e.what());

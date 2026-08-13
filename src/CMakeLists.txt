@@ -41,6 +41,14 @@ set(ZB_SOURCES
     gui/DeviceLayoutWidget.cpp
     gui/PathComboBox.h
     gui/PathComboBox.cpp
+    gui/RemotePathComboBox.h
+    gui/RemotePathComboBox.cpp
+    gui/FileBrowserWidget.h
+    gui/FileBrowserWidget.cpp
+    gui/RemoteFileModel.h
+    gui/RemoteFileModel.cpp
+    gui/RemoteDirTreeModel.h
+    gui/RemoteDirTreeModel.cpp
     ${CMAKE_SOURCE_DIR}/resources/app.rc
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )

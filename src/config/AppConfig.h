@@ -16,6 +16,10 @@ struct AppConfig {
     // Shared pairing code (plaintext locally; only hash goes over network).
     std::string pairingCode = "test123";
 
+    // Username as secondary authentication factor (combined with pairing code
+    // to derive the token hash, preventing same-code collisions in LAN).
+    std::string username = "user";
+
     // Server display name (hostname used when empty).
     std::string serverName;
 

@@ -95,6 +95,8 @@ void App::onTransferComplete(uint64_t id, bool ok, const std::string& msg) {
 
 void App::installLogSink() {
     log::addSink([this](log::Level lvl, std::string_view line) {
+        // Skip Info and Debug in the GUI log view to reduce noise.
+        if (lvl == log::Level::Info || lvl == log::Level::Debug) return;
         QString tag;
         switch (lvl) {
             case log::Level::Debug: tag = "DBG"; break;
@@ -102,8 +104,6 @@ void App::installLogSink() {
             case log::Level::Warn:  tag = "WRN"; break;
             case log::Level::Error: tag = "ERR"; break;
         }
-        // Emitting from arbitrary threads is safe with auto/queued connections
-        // because the signal arguments are Qt-shared types (QString).
         emit logMessage(tag, QString::fromUtf8(line.data(), static_cast<int>(line.size())));
     });
 }
@@ -749,9 +749,11 @@ void App::resetSession() {
 // File transfer
 // ---------------------------------------------------------------------------
 
-uint64_t App::sendFiles(const std::vector<std::string>& paths) {
+uint64_t App::sendFiles(const std::vector<std::string>& paths,
+                        uint8_t flags,
+                        const std::string& destDir) {
     if (!fileTransfer_ || !running_.load()) return 0;
-    return fileTransfer_->sendFiles(paths);
+    return fileTransfer_->sendFiles(paths, flags, destDir);
 }
 
 void App::acceptTransfer(uint64_t id, const std::string& destDir) {
@@ -774,34 +776,44 @@ void App::wireFileTransferCallbacks() {
         onTransferComplete(id, ok, m);
     });
     fileTransfer_->onOffer([this](uint64_t id, const std::vector<TransferEntry>&,
-                                  uint64_t total) {
+                                  uint64_t total, const std::string& /*destDir*/,
+                                  uint8_t /*flags*/) {
         onTransferOffer(id, total);
     });
 
-    // Incoming offers: forward to the UI as a queued signal so a confirmation
-    // dialog can be shown. The UI calls acceptTransfer/rejectTransfer.
-    // Exception: if we initiated a pull (download), auto-accept silently.
+    // Incoming offers are auto-accepted because every transfer in this
+    // application is explicitly user-initiated (right-click upload/download
+    // or clipboard file copy). A modal confirmation dialog on the receiver
+    // is counter-productive in a KVM context: it appears on the controlled
+    // machine while the user is driving it from the controller, and causes
+    // the sender to hang at 0% if it is never clicked.
+    //
+    // Destination directory priority:
+    //   1. pendingPullDestDir_ — set when this side requested a download
+    //   2. offerDestDir       — set by the sender (e.g. upload to remote browser path)
+    //   3. config_.receiveDir — configured default
+    //   4. TEMP/ZeroBorders   — fallback in accept()
     fileTransfer_->setIncomingOfferCallback(
-        [this](uint64_t id, const std::vector<TransferEntry>& entries, uint64_t total) {
+        [this](uint64_t id, const std::vector<TransferEntry>& /*entries*/,
+               uint64_t total, const std::string& offerDestDir, uint8_t /*flags*/) {
             std::string pullDest;
             {
                 std::lock_guard<std::mutex> lk(pendingPullMutex_);
                 pullDest = pendingPullDestDir_;
                 pendingPullDestDir_.clear();
             }
+            std::string destDir;
             if (!pullDest.empty()) {
-                // Auto-accept pull-initiated transfer without UI prompt.
-                onTransferOffer(id, total);
-                fileTransfer_->accept(id, pullDest);
-                return;
+                destDir = pullDest;
+            } else if (!offerDestDir.empty()) {
+                destDir = offerDestDir;
+            } else {
+                destDir = config_.receiveDir;
             }
-            QStringList names;
-            names.reserve(static_cast<int>(entries.size()));
-            for (const auto& e : entries) {
-                names << QString::fromStdString(e.relativePath);
-            }
-            emit incomingOffer(static_cast<quint64>(id), names,
-                               static_cast<quint64>(total));
+            ZB_LOG_INFO("Auto-accepting transfer {} ({} bytes) to {}",
+                        id, total, destDir.empty() ? "(default)" : destDir);
+            onTransferOffer(id, total);
+            fileTransfer_->accept(id, destDir);
         });
 
     // Configure the default receive directory (used as a fallback / when the
@@ -819,8 +831,16 @@ void App::wireFileTransferCallbacks() {
 }
 
 void App::wireServerCallbacks() {
-    fileTransfer_->setSendCallback([this](MsgType t, const std::vector<uint8_t>& p) {
-        if (server_) server_->sendData(t, p);
+    fileTransfer_->setSendCallback([this](MsgType t, const std::vector<uint8_t>& p) -> bool {
+        if (!server_) return false;
+        // Control-channel messages (0x01-0x1F) include FileOffer/FileAccept/
+        // TransferComplete; data-channel messages (0x20+) include FileChunk/
+        // FileChunkAck. Route each to the correct socket so small control
+        // messages are not delayed by bulk data and get TCP_NODELAY.
+        if (static_cast<uint8_t>(t) < 0x20)
+            return server_->sendControl(t, p);
+        else
+            return server_->sendData(t, p);
     });
     wireFileTransferCallbacks();
 
@@ -891,6 +911,10 @@ void App::wireServerCallbacks() {
                 handleListDirResponse(p);
             } else if (t == MsgType::FilePullRequest) {
                 handleFilePullRequest(p);
+            } else if (fileTransfer_ &&
+                       (t == MsgType::FileOffer || t == MsgType::FileAccept ||
+                        t == MsgType::TransferProgress || t == MsgType::TransferComplete)) {
+                fileTransfer_->handleMessage(t, p);
             }
         } catch (const std::exception& e) {
             ZB_LOG_ERROR("Server ctrl callback error: {}", e.what());
@@ -917,8 +941,14 @@ void App::wireServerCallbacks() {
 // ---------------------------------------------------------------------------
 
 void App::wireClientCallbacks() {
-    fileTransfer_->setSendCallback([this](MsgType t, const std::vector<uint8_t>& p) {
-        if (client_) client_->sendData(t, p);
+    fileTransfer_->setSendCallback([this](MsgType t, const std::vector<uint8_t>& p) -> bool {
+        if (!client_) return false;
+        // Route control messages (0x01-0x1F) to the control channel and data
+        // messages (0x20+) to the data channel. See wireServerCallbacks().
+        if (static_cast<uint8_t>(t) < 0x20)
+            return client_->sendControl(t, p);
+        else
+            return client_->sendData(t, p);
     });
     wireFileTransferCallbacks();
 
@@ -973,6 +1003,10 @@ void App::wireClientCallbacks() {
                 handleListDirResponse(p);
             } else if (t == MsgType::FilePullRequest) {
                 handleFilePullRequest(p);
+            } else if (fileTransfer_ &&
+                       (t == MsgType::FileOffer || t == MsgType::FileAccept ||
+                        t == MsgType::TransferProgress || t == MsgType::TransferComplete)) {
+                fileTransfer_->handleMessage(t, p);
             }
         } catch (const std::exception& e) {
             ZB_LOG_ERROR("Client ctrl callback error: {}", e.what());

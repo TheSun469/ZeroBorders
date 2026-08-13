@@ -3,6 +3,8 @@
 #include "../core/Protocol.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <functional>
@@ -20,8 +22,10 @@ namespace zb {
 // owner calls accept()/reject() after user confirmation; chunks then flow.
 class FileTransferManager {
 public:
-    using SendDataCallback = std::function<void(MsgType, const std::vector<uint8_t>&)>;
-    using OfferCallback = std::function<void(uint64_t id, const std::vector<TransferEntry>&, uint64_t total)>;
+    // Returns true if the message was handed to the transport successfully.
+    // A false return causes the sender to abort the transfer.
+    using SendDataCallback = std::function<bool(MsgType, const std::vector<uint8_t>&)>;
+    using OfferCallback = std::function<void(uint64_t id, const std::vector<TransferEntry>&, uint64_t total, const std::string& destDir, uint8_t flags)>;
     using ProgressCallback = std::function<void(uint64_t id, uint64_t transferred, uint64_t total)>;
     using CompleteCallback = std::function<void(uint64_t id, bool ok, const std::string& message)>;
     using ClipboardCompleteCallback = std::function<void(uint64_t id, const std::vector<std::string>& paths)>;
@@ -45,7 +49,10 @@ public:
 
     // Sender: initiate a file transfer. Returns the transfer ID (0 on failure).
     // flags: bit 0 = clipboard transfer (auto-accept on receiver, put in clipboard).
-    uint64_t sendFiles(const std::vector<std::string>& localPaths, uint8_t flags = 0);
+    // destDir: target directory on the receiver (empty = receiver default).
+    uint64_t sendFiles(const std::vector<std::string>& localPaths,
+                       uint8_t flags = 0,
+                       const std::string& destDir = "");
 
     // Receiver: accept an offer and specify destination directory.
     void accept(uint64_t id, const std::string& destDir);
@@ -59,6 +66,12 @@ public:
 
 private:
     static constexpr uint32_t kChunkSize = 64 * 1024;
+    // Max unacknowledged bytes in flight before the sender pauses.
+    static constexpr uint64_t kSendWindowBytes = 4 * 1024 * 1024; // 4 MB
+    // How long to wait for FileAccept before giving up.
+    static constexpr int kAcceptTimeoutSec = 30;
+    // How long to wait for an ACK before aborting (detects dead receiver).
+    static constexpr int kAckTimeoutSec = 60;
 
     // Build file offer entries from local paths (recursively for directories).
     // entryPaths[i] is the local filesystem path corresponding to entries[i].
@@ -99,6 +112,7 @@ private:
         std::vector<TransferEntry> entries;
         uint64_t totalSize = 0;
         uint8_t flags = 0;
+        std::string destDir;
     };
 
     struct SenderState {
@@ -107,6 +121,13 @@ private:
         std::thread thread;
         std::atomic<bool> active{false};
         std::atomic<bool> finished{false};
+        // Flow control: signalled when an ACK arrives or the transfer is
+        // cancelled. The sender thread waits on this when the window is full.
+        std::mutex ackMutex;
+        std::condition_variable ackCv;
+        uint64_t ackedBytes = 0;       // total bytes acknowledged by receiver
+        std::chrono::steady_clock::time_point lastAckTime;
+        std::chrono::steady_clock::time_point offerTime;
     };
 
     std::atomic<uint64_t> nextId_{0};

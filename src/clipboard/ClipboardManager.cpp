@@ -215,6 +215,14 @@ void ClipboardManager::onChangeDetected() {
         ZB_LOG_DEBUG("Clipboard change ignored (echo of our own write)");
         return;
     }
+    // Skip duplicate content. Windows fires multiple WM_CLIPBOARDUPDATE
+    // events for a single copy operation (delayed rendering populates
+    // formats one at a time), and each event re-reads the same clipboard
+    // content with the same digest.
+    if (content.digest == lastSentDigest_) {
+        ZB_LOG_DEBUG("Clipboard change ignored (duplicate of last sent)");
+        return;
+    }
     const char* fmtName = "unknown";
     switch (content.format) {
         case ClipboardFormat::Text:  fmtName = "text"; break;
@@ -224,6 +232,7 @@ void ClipboardManager::onChangeDetected() {
     }
     ZB_LOG_INFO("Local clipboard changed: format={}, digest={:.8}",
                 fmtName, tokenToHex(content.digest));
+    lastSentDigest_ = content.digest;
     if (callback_) {
         try {
             callback_(content);
@@ -240,7 +249,9 @@ void ClipboardManager::syncNow() {
     ClipboardContent content;
     if (!readLocal(content)) return;
     if (isEcho(content.digest)) return;
+    if (content.digest == lastSentDigest_) return;
     ZB_LOG_INFO("Initial clipboard sync on connect");
+    lastSentDigest_ = content.digest;
     try {
         callback_(content);
     } catch (const std::exception& e) {

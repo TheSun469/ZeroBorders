@@ -118,13 +118,16 @@ void TcpTransport::start() {
     recvThread_ = std::thread([this] { recvLoop(); });
 }
 
-void TcpTransport::send(MsgType type, const std::vector<uint8_t>& payload) {
-    sendRaw(buildFrame(channel_, type, payload));
+bool TcpTransport::send(MsgType type, const std::vector<uint8_t>& payload) {
+    return sendRaw(buildFrame(channel_, type, payload));
 }
 
-void TcpTransport::sendRaw(const std::vector<uint8_t>& frame) {
-    if (!connected_.load()) return;
+bool TcpTransport::sendRaw(const std::vector<uint8_t>& frame) {
+    if (!connected_.load()) return false;
     std::lock_guard<std::mutex> lk(sendMutex_);
+    // Re-check connected_ after acquiring the lock in case disconnect fired
+    // while we were waiting.
+    if (!connected_.load() || sock_ == INVALID_SOCKET) return false;
     size_t total = 0;
     while (total < frame.size()) {
         int n = ::send(sock_, reinterpret_cast<const char*>(frame.data() + total),
@@ -132,10 +135,15 @@ void TcpTransport::sendRaw(const std::vector<uint8_t>& frame) {
         if (n == SOCKET_ERROR) {
             ZB_LOG_WARN("send() failed: {}", WSAGetLastError());
             fireDisconnect();
-            return;
+            return false;
+        }
+        if (n == 0) {
+            fireDisconnect();
+            return false;
         }
         total += static_cast<size_t>(n);
     }
+    return true;
 }
 
 void TcpTransport::close() {

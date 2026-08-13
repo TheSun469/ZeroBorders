@@ -23,6 +23,7 @@ class QMenu;
 class QAction;
 class QToolButton;
 class QSplitter;
+class QStatusBar;
 
 namespace zb {
 
@@ -39,6 +40,7 @@ private slots:
     void onStartStop();
     void onSendSelected();
     void onDownloadSelected();
+    void onRefreshLocal();
     void onRefreshRemote();
     void onLocalPathChanged(const QString& path);
     void onNavigateRemote(const QString& path);
@@ -50,6 +52,12 @@ private slots:
     void onTrayActivated(QSystemTrayIcon::ActivationReason reason);
     void onShowWindow();
     void onQuitApp();
+    void onOpenSettings();
+    void onNewFolder();
+    void onNewFile();
+    void onDeleteSelected();
+    void onRenameSelected();
+    void onCopyPath();
 
     void onStatusChanged(const QString& status);
     void onConnectionChanged(bool connected, const QString& peerName,
@@ -63,6 +71,7 @@ private slots:
 
 private:
     void buildUi();
+    void buildMenuBar();
     void buildTrayIcon();
     void loadConfig();
     void saveConfig();
@@ -76,42 +85,34 @@ private:
     App app_;
     AppConfig config_;
 
-    // --- Connection group ---
+    // --- Connection (start button only, rest moved to status bar) ---
     QGroupBox* connGroup_ = nullptr;
-    QLineEdit* codeEdit_ = nullptr;
-    QLineEdit* usernameEdit_ = nullptr;
-    QComboBox* rolePrefCombo_ = nullptr;
     QPushButton* startBtn_ = nullptr;
-    QLabel* statusLabel_ = nullptr;
-    QLabel* peerLabel_ = nullptr;
-    QLabel* roleLabel_ = nullptr;
 
-    // --- Settings group ---
-    QGroupBox* settingsGroup_ = nullptr;
-    QCheckBox* autoStartCheck_ = nullptr;
-    QCheckBox* minimizeToTrayCheck_ = nullptr;
+    // --- Settings dialog widgets (created on demand) ---
+    // Stored in the dialog, not here.
 
     // --- Screen layout group ---
     QGroupBox* layoutGroup_ = nullptr;
     DeviceLayoutWidget* layoutWidget_ = nullptr;
     QToolButton* layoutCollapseBtn_ = nullptr;
     bool layoutCollapsed_ = false;
-    int savedLayoutHeight_ = 140;  // remembered height for restore
+    int savedLayoutHeight_ = 260;
 
     // --- File transfer group ---
     QGroupBox* transferGroup_ = nullptr;
-    // Left = local filesystem browser, right = remote receive directory.
     FileBrowserWidget* localBrowser_ = nullptr;
     FileBrowserWidget* remoteBrowser_ = nullptr;
-    QPushButton* refreshRemoteBtn_ = nullptr;
 
-    // Track which side initiated the current transfer.
-    // 0 = none, 1 = local (upload), 2 = remote (download)
     int activeSide_ = 0;
 
     // --- Log ---
     QPlainTextEdit* logView_ = nullptr;
-    QPushButton* clearLogBtn_ = nullptr;
+
+    // --- Status bar widgets ---
+    QLabel* statusLabel_ = nullptr;
+    QLabel* peerLabel_ = nullptr;
+    QLabel* roleLabel_ = nullptr;
 
     // --- System tray ---
     QSystemTrayIcon* trayIcon_ = nullptr;
@@ -124,7 +125,7 @@ private:
     QSplitter* mainSplitter_ = nullptr;
 
     quint64 currentTransferId_ = 0;
-    bool transferIncoming_ = false;  // true = incoming transfer (show on local)
+    bool transferIncoming_ = false;
 };
 
 } // namespace zb

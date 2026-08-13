@@ -73,6 +73,11 @@ private:
     QRect dragStartRect_;     // client rect before drag started
     bool hoverSnapped_ = false;
 
+    // Canvas pan: drag the background to reposition both monitors.
+    bool panning_ = false;
+    QPoint panStart_;
+    QPoint panOffset_;        // accumulated pan offset
+
     // Visual scale: pixels per logical "screen inch" used to proportionally
     // size the rectangles based on resolution.
     double scale_ = 0.1;

@@ -183,11 +183,11 @@ void DeviceLayoutWidget::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
 
-    // Canvas background — Windows Settings dark surface.
-    p.fillRect(rect(), QColor(0x20, 0x20, 0x20));
+    // Canvas background — light surface matching Word 2019 theme.
+    p.fillRect(rect(), QColor(0xF3, 0xF2, 0xF1));
 
-    // Subtle checker/dot grid for that display-settings feel.
-    p.setPen(QPen(QColor(0x2E, 0x2E, 0x2E), 1));
+    // Subtle dot grid.
+    p.setPen(QPen(QColor(0xE1, 0xDF, 0xDD), 1));
     for (int x = kCanvasPadding; x < width(); x += 24) {
         p.drawLine(x, kCanvasPadding, x, height() - kCanvasPadding);
     }
@@ -195,12 +195,16 @@ void DeviceLayoutWidget::paintEvent(QPaintEvent*) {
         p.drawLine(kCanvasPadding, y, width() - kCanvasPadding, y);
     }
 
+    // Apply pan offset to all monitor drawings.
+    p.save();
+    p.translate(panOffset_);
+
     auto drawMonitor = [&](const QRect& r, const QString& number,
                            const QString& title, const QString& subtitle,
                            bool isHost, bool isDragging) {
         // Shadow.
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(0, 0, 0, 90));
+        p.setBrush(QColor(0, 0, 0, 38));
         p.drawRoundedRect(r.translated(0, 2), kCornerRadius, kCornerRadius);
 
         // Body.
@@ -208,12 +212,11 @@ void DeviceLayoutWidget::paintEvent(QPaintEvent*) {
                              : (isDragging ? QColor(0x40, 0x90, 0xE0)
                                            : QColor(0x2B, 0x6B, 0xB5));
         if (!isHost && !connected_) {
-            // Disconnected peer: muted look.
-            fill = QColor(0x3A, 0x3A, 0x3A);
+            fill = QColor(0xA1, 0x9F, 0x9D);
         }
         p.setBrush(fill);
         p.setPen(QPen(isDragging ? QColor(0xFF, 0xFF, 0xFF, 200)
-                                 : QColor(0x10, 0x10, 0x10, 160), 1));
+                                 : QColor(0x60, 0x5E, 0x5C, 160), 1));
         p.drawRoundedRect(r, kCornerRadius, kCornerRadius);
 
         // Inner highlight border.
@@ -242,7 +245,6 @@ void DeviceLayoutWidget::paintEvent(QPaintEvent*) {
 
         QRect textRect = r.adjusted(8, kNumberBadgeSize + 12, -8, -8);
         QRect titleRect;
-        QRect subRect;
         p.drawText(textRect, Qt::AlignHCenter | Qt::AlignTop | Qt::TextWordWrap,
                    title, &titleRect);
 
@@ -254,43 +256,57 @@ void DeviceLayoutWidget::paintEvent(QPaintEvent*) {
             p.setPen(QColor(255, 255, 255, 180));
             QRect subArea = textRect;
             subArea.setTop(titleRect.bottom() + 2);
+            QRect subRect;
             p.drawText(subArea, Qt::AlignHCenter | Qt::AlignTop | Qt::TextWordWrap,
                        subtitle, &subRect);
         }
     };
 
-    // Draw host (display 1).
-    QString hostTitle = QStringLiteral("本机");
+    // Draw host.
+    QString hostTitle = QStringLiteral("控制端");
     QString hostSub = QString("%1×%2").arg(localW_).arg(localH_);
     drawMonitor(hostRect_, "1", hostTitle, hostSub, true, false);
 
-    // Draw client (display 2).
+    // Draw client.
     QString peerTitle = peerName_.isEmpty()
-        ? (connected_ ? QStringLiteral("对端设备") : QStringLiteral("对端（未连接）"))
+        ? (connected_ ? QStringLiteral("客户端") : QStringLiteral("客户端（未连接）"))
         : peerName_;
     QString peerSub = connected_
         ? QString("%1×%2").arg(peerW_).arg(peerH_)
         : QString();
     drawMonitor(clientRect_, "2", peerTitle, peerSub, false, dragging_);
 
-    // Hint text at bottom.
-    p.setPen(QColor(255, 255, 255, 130));
+    p.restore();
+
+    // Hint text at bottom (not panned).
+    p.setPen(QColor(0x60, 0x5E, 0x5C, 180));
     QFont hf = p.font();
     hf.setPointSize(8);
     hf.setBold(false);
     p.setFont(hf);
     p.drawText(rect().adjusted(0, 0, 0, -6),
                Qt::AlignHCenter | Qt::AlignBottom,
-               QStringLiteral("拖动设备矩形设置相对位置"));
+               QStringLiteral("拖动矩形设置位置，拖动空白处平移画布"));
 }
 
 void DeviceLayoutWidget::mousePressEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton && clientRect_.contains(event->pos())) {
-        dragging_ = true;
-        dragOffset_ = event->pos() - clientRect_.topLeft();
-        dragStartRect_ = clientRect_;
-        setCursor(Qt::ClosedHandCursor);
-        update();
+    if (event->button() == Qt::LeftButton) {
+        // Check if click is on the client rect (translated by pan offset).
+        QRect panClientRect = clientRect_.translated(panOffset_);
+        if (panClientRect.contains(event->pos())) {
+            dragging_ = true;
+            dragOffset_ = event->pos() - panClientRect.topLeft();
+            dragStartRect_ = clientRect_;
+            setCursor(Qt::ClosedHandCursor);
+            update();
+            event->accept();
+            return;
+        }
+
+        // Otherwise, start panning the canvas.
+        panning_ = true;
+        panStart_ = event->pos();
+        setCursor(Qt::SizeAllCursor);
         event->accept();
         return;
     }
@@ -299,24 +315,32 @@ void DeviceLayoutWidget::mousePressEvent(QMouseEvent* event) {
 
 void DeviceLayoutWidget::mouseMoveEvent(QMouseEvent* event) {
     if (dragging_ && (event->buttons() & Qt::LeftButton)) {
-        QPoint topLeft = event->pos() - dragOffset_;
+        // Drag the client rect relative to the pan-adjusted position.
+        QPoint topLeft = event->pos() - dragOffset_ - panOffset_;
         int cw = clientRect_.width();
         int ch = clientRect_.height();
 
-        // Clamp within the canvas (with some margin so it doesn't go
-        // fully off-screen).
-        int nx = std::clamp(topLeft.x(), kCanvasPadding,
-                            width() - cw - kCanvasPadding);
-        int ny = std::clamp(topLeft.y(), kCanvasPadding,
-                            height() - ch - kCanvasPadding);
+        int nx = std::clamp(topLeft.x(), kCanvasPadding - panOffset_.x(),
+                            width() - cw - kCanvasPadding - panOffset_.x());
+        int ny = std::clamp(topLeft.y(), kCanvasPadding - panOffset_.y(),
+                            height() - ch - kCanvasPadding - panOffset_.y());
         clientRect_ = QRect(nx, ny, cw, ch);
         update();
         event->accept();
         return;
     }
 
+    if (panning_ && (event->buttons() & Qt::LeftButton)) {
+        panOffset_ += event->pos() - panStart_;
+        panStart_ = event->pos();
+        update();
+        event->accept();
+        return;
+    }
+
     // Hover cursor.
-    if (clientRect_.contains(event->pos())) {
+    QRect panClientRect = clientRect_.translated(panOffset_);
+    if (panClientRect.contains(event->pos())) {
         setCursor(Qt::OpenHandCursor);
     } else {
         unsetCursor();
@@ -327,8 +351,6 @@ void DeviceLayoutWidget::mouseMoveEvent(QMouseEvent* event) {
 void DeviceLayoutWidget::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton && dragging_) {
         dragging_ = false;
-        setCursor(clientRect_.contains(event->pos()) ? Qt::OpenHandCursor
-                                                      : Qt::ArrowCursor);
 
         // Snap to nearest edge and determine final layout.
         QRect snapped = snapToEdge(clientRect_);
@@ -339,9 +361,18 @@ void DeviceLayoutWidget::mouseReleaseEvent(QMouseEvent* event) {
         clientRect_ = snapped;
         update();
 
+        QRect panClientRect = clientRect_.translated(panOffset_);
+        setCursor(panClientRect.contains(event->pos()) ? Qt::OpenHandCursor
+                                                       : Qt::ArrowCursor);
         if (changed) {
             emit layoutChanged(layout_);
         }
+        event->accept();
+        return;
+    }
+    if (event->button() == Qt::LeftButton && panning_) {
+        panning_ = false;
+        unsetCursor();
         event->accept();
         return;
     }

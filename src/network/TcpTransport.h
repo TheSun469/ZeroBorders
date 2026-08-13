@@ -40,8 +40,8 @@ public:
     void adopt(SOCKET s);
     void start();
 
-    void send(MsgType type, const std::vector<uint8_t>& payload);
-    void sendRaw(const std::vector<uint8_t>& frame);
+    bool send(MsgType type, const std::vector<uint8_t>& payload);
+    bool sendRaw(const std::vector<uint8_t>& frame);
 
     void close();
     bool isConnected() const { return connected_.load(); }

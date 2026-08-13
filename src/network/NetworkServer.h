@@ -34,8 +34,8 @@ public:
 
     bool isReady() const { return ready_.load(); }
 
-    void sendControl(MsgType t, const std::vector<uint8_t>& p);
-    void sendData(MsgType t, const std::vector<uint8_t>& p);
+    bool sendControl(MsgType t, const std::vector<uint8_t>& p);
+    bool sendData(MsgType t, const std::vector<uint8_t>& p);
 
     void onControlMessage(MessageCallback cb) { userCtrl_ = std::move(cb); }
     void onDataMessage(MessageCallback cb) { userData_ = std::move(cb); }

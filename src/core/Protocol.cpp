@@ -399,6 +399,7 @@ std::vector<uint8_t> serializeFileOffer(const FileOfferMsg& m) {
         w.u8(e.isDirectory ? 1 : 0);
     }
     w.u8(m.flags);
+    w.string(m.destDir);
     return w.take();
 }
 
@@ -415,6 +416,7 @@ bool parseFileOffer(const std::vector<uint8_t>& d, FileOfferMsg& out) {
         out.entries.push_back(std::move(e));
     }
     out.flags = r.u8();
+    if (!r.string(out.destDir)) return false;
     return r.ok();
 }
 

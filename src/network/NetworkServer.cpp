@@ -321,7 +321,7 @@ void NetworkServer::teardownImpl(const std::string& reason) {
     }
 }
 
-void NetworkServer::sendControl(MsgType t, const std::vector<uint8_t>& p) {
+bool NetworkServer::sendControl(MsgType t, const std::vector<uint8_t>& p) {
     // Copy the transport pointer under the lock, then release the lock before
     // calling send(). send() may fail and trigger fireDisconnect() -> postTeardown(),
     // which joins the cleanup thread; doing that while holding stateMutex_
@@ -332,16 +332,18 @@ void NetworkServer::sendControl(MsgType t, const std::vector<uint8_t>& p) {
         std::lock_guard<std::mutex> lk(stateMutex_);
         ctrl = ctrl_;
     }
-    if (ctrl) ctrl->send(t, p);
+    if (ctrl) return ctrl->send(t, p);
+    return false;
 }
 
-void NetworkServer::sendData(MsgType t, const std::vector<uint8_t>& p) {
+bool NetworkServer::sendData(MsgType t, const std::vector<uint8_t>& p) {
     std::shared_ptr<TcpTransport> data;
     {
         std::lock_guard<std::mutex> lk(stateMutex_);
         data = data_;
     }
-    if (data) data->send(t, p);
+    if (data) return data->send(t, p);
+    return false;
 }
 
 } // namespace zb

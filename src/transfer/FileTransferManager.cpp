@@ -71,21 +71,21 @@ FileTransferManager::~FileTransferManager() {
 }
 
 void FileTransferManager::cancelAll() {
-    // Signal all senders to stop, then release the lock before joining so
-    // sender threads can acquire the mutex during their shutdown checks.
+    // Signal all senders to stop and wake flow-control waits. Move threads
+    // out and join them BEFORE destroying the SenderState objects so that no
+    // thread is waiting on a condition_variable that gets destroyed.
     std::vector<std::thread> threadsToJoin;
     {
         std::lock_guard<std::mutex> lk(mutex_);
         for (auto& [id, sender] : senders_) {
             sender.active = false;
+            sender.ackCv.notify_all();
         }
         for (auto& [id, sender] : senders_) {
             if (sender.thread.joinable()) {
                 threadsToJoin.push_back(std::move(sender.thread));
             }
         }
-        senders_.clear();
-
         for (auto& [id, recv] : receivers_) {
             for (auto& f : recv.files) {
                 if (f.is_open()) f.close();
@@ -96,6 +96,9 @@ void FileTransferManager::cancelAll() {
     for (auto& t : threadsToJoin) {
         t.join();
     }
+    // Now that no sender thread is running, it is safe to destroy states.
+    std::lock_guard<std::mutex> lk(mutex_);
+    senders_.clear();
 }
 
 void FileTransferManager::cleanupFinishedSenders() {
@@ -159,7 +162,9 @@ bool FileTransferManager::buildEntries(const std::vector<std::string>& paths,
     return !entries.empty();
 }
 
-uint64_t FileTransferManager::sendFiles(const std::vector<std::string>& localPaths, uint8_t flags) {
+uint64_t FileTransferManager::sendFiles(const std::vector<std::string>& localPaths,
+                                        uint8_t flags,
+                                        const std::string& destDir) {
     std::vector<TransferEntry> entries;
     std::vector<std::string> entryPaths;
     uint64_t totalSize = 0;
@@ -176,6 +181,7 @@ uint64_t FileTransferManager::sendFiles(const std::vector<std::string>& localPat
     offer.totalSize = totalSize;
     offer.entries = entries;
     offer.flags = flags;
+    offer.destDir = destDir;
 
     // Store sender state for when accept arrives.
     {
@@ -186,16 +192,50 @@ uint64_t FileTransferManager::sendFiles(const std::vector<std::string>& localPat
         s.entryPaths = entryPaths;
         s.active = false; // Will activate on accept.
         s.finished = false;
+        s.ackedBytes = 0;
+        auto now = std::chrono::steady_clock::now();
+        s.offerTime = now;
+        s.lastAckTime = now;
     }
 
     ZB_LOG_INFO("Sending file offer: id={}, {} entries, {} bytes total",
                 id, entries.size(), totalSize);
 
     if (sendCb_) {
-        sendCb_(MsgType::FileOffer, serializeFileOffer(offer));
+        if (!sendCb_(MsgType::FileOffer, serializeFileOffer(offer))) {
+            ZB_LOG_ERROR("Failed to send file offer for id={}", id);
+            std::lock_guard<std::mutex> lk(mutex_);
+            senders_.erase(id);
+            if (completeCb_) completeCb_(id, false, "连接已断开，无法发送文件请求");
+            return 0;
+        }
     }
 
-    if (offerCb_) offerCb_(id, entries, totalSize);
+    if (offerCb_) offerCb_(id, entries, totalSize, destDir, flags);
+
+    // Start a detached watchdog that cancels the transfer if the receiver
+    // never responds with FileAccept within the timeout. Without this the
+    // sender would wait forever when the peer is unresponsive.
+    std::thread([this, id]() {
+        std::this_thread::sleep_for(std::chrono::seconds(kAcceptTimeoutSec));
+        bool shouldFail = false;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            auto it = senders_.find(id);
+            if (it != senders_.end() && !it->second.active.load() &&
+                !it->second.finished.load()) {
+                shouldFail = true;
+            }
+        }
+        if (shouldFail) {
+            ZB_LOG_WARN("Transfer {} timed out waiting for accept", id);
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                senders_.erase(id);
+            }
+            if (completeCb_) completeCb_(id, false, "等待对端接收超时");
+        }
+    }).detach();
 
     return id;
 }
@@ -218,6 +258,35 @@ void FileTransferManager::accept(uint64_t id, const std::string& destDir) {
     if (!entries.empty()) {
         std::string dir = destDir;
         if (dir.empty()) dir = defaultReceiveDir_;
+
+        // Validate that the directory is writable. System directories like
+        // C:\Users require elevation and will silently fail all file creation.
+        std::error_code ec;
+        fs::path dirPath;
+        if (!dir.empty()) {
+            dirPath = pathFromUtf8(dir);
+            fs::create_directories(dirPath, ec);
+            // Probe writability by creating and removing a temp file.
+            if (!ec) {
+                auto probe = dirPath / L".zb_write_test";
+                std::ofstream test(probe, std::ios::binary);
+                bool writable = test.is_open();
+                test.close();
+                if (writable) {
+                    std::error_code rmEc;
+                    fs::remove(probe, rmEc);
+                } else {
+                    ZB_LOG_WARN("Receive dir {} is not writable, falling back", dir);
+                    dir.clear();
+                }
+            } else {
+                ZB_LOG_WARN("Cannot create receive dir {}: {}, falling back",
+                            dir, ec.message());
+                dir.clear();
+                ec.clear();
+            }
+        }
+
         if (dir.empty()) {
 #ifdef _WIN32
             // Use the wide-char API so the path is always correct regardless
@@ -231,17 +300,17 @@ void FileTransferManager::accept(uint64_t id, const std::string& destDir) {
             const char* temp = std::getenv("TEMP");
             if (temp) dir = std::string(temp) + "/ZeroBorders";
 #endif
-        }
-        std::error_code ec;
-        fs::path dirPath = pathFromUtf8(dir);
-        fs::create_directories(dirPath, ec);
-        if (ec) {
-            ZB_LOG_ERROR("Cannot create receive dir {}: {}", dir, ec.message());
-            reject(id);
-            return;
+            dirPath = pathFromUtf8(dir);
+            fs::create_directories(dirPath, ec);
+            if (ec) {
+                ZB_LOG_ERROR("Cannot create fallback receive dir {}: {}", dir, ec.message());
+                reject(id);
+                return;
+            }
         }
         ZB_LOG_INFO("Using receive directory: {}", dir);
 
+        int openFailures = 0;
         {
             std::lock_guard<std::mutex> lk(mutex_);
             auto& recv = receivers_[id];
@@ -279,9 +348,28 @@ void FileTransferManager::accept(uint64_t id, const std::string& destDir) {
 #endif
                     if (!it2->second.files[i].is_open()) {
                         ZB_LOG_ERROR("Cannot create file: {}", resolved);
+                        ++openFailures;
                     }
                 }
             }
+        }
+
+        // If every file failed to open, reject the transfer instead of
+        // pretending it succeeded.
+        int fileCount = 0;
+        for (const auto& e : entries) if (!e.isDirectory) ++fileCount;
+        if (fileCount > 0 && openFailures == fileCount) {
+            ZB_LOG_ERROR("All {} files failed to create, rejecting transfer {}", fileCount, id);
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                receivers_.erase(id);
+            }
+            FileAcceptMsg rej;
+            rej.transferId = id;
+            rej.result = 1;
+            rej.destDir = "无法在接收目录创建文件";
+            if (sendCb_) sendCb_(MsgType::FileAccept, serializeFileAccept(rej));
+            return;
         }
     }
 
@@ -321,31 +409,36 @@ void FileTransferManager::handleMessage(MsgType type, const std::vector<uint8_t>
             FileOfferMsg msg;
             if (!parseFileOffer(payload, msg)) return;
 
-            ZB_LOG_INFO("Received file offer: id={}, {} entries, {} bytes, flags={}",
-                        msg.transferId, msg.entryCount, msg.totalSize, msg.flags);
+            ZB_LOG_INFO("Received file offer: id={}, {} entries, {} bytes, flags={}, destDir={}",
+                        msg.transferId, msg.entryCount, msg.totalSize, msg.flags,
+                        msg.destDir.empty() ? "(default)" : msg.destDir);
 
             try {
-                // Clipboard transfers (flags & 1): auto-accept, skip UI dialog.
-                bool isClipboard = (msg.flags & 1) != 0;
-
-                if (!isClipboard && incomingOfferCb_) {
+                if (incomingOfferCb_) {
                     {
                         std::lock_guard<std::mutex> lk(mutex_);
                         pendingOffers_[msg.transferId] = {
-                            std::move(msg.entries), msg.totalSize, msg.flags};
+                            std::move(msg.entries), msg.totalSize, msg.flags,
+                            std::move(msg.destDir)};
                     }
                     const std::vector<TransferEntry>* view = nullptr;
+                    std::string offerDest;
                     {
                         std::lock_guard<std::mutex> lk(mutex_);
                         auto it = pendingOffers_.find(msg.transferId);
-                        if (it != pendingOffers_.end()) view = &it->second.entries;
+                        if (it != pendingOffers_.end()) {
+                            view = &it->second.entries;
+                            offerDest = it->second.destDir;
+                        }
                     }
-                    if (view) incomingOfferCb_(msg.transferId, *view, msg.totalSize);
+                    if (view) incomingOfferCb_(msg.transferId, *view, msg.totalSize,
+                                               offerDest, msg.flags);
                     return;
                 }
 
-                // Auto-accept (clipboard transfers or no UI callback).
-                std::string destDir = defaultReceiveDir_;
+                // No incoming callback — auto-accept. Use the offer's destDir
+                // if provided, otherwise fall back to default/temp.
+                std::string destDir = msg.destDir.empty() ? defaultReceiveDir_ : msg.destDir;
                 std::error_code ec;
                 if (!destDir.empty()) {
                     fs::create_directories(pathFromUtf8(destDir), ec);
@@ -353,7 +446,6 @@ void FileTransferManager::handleMessage(MsgType type, const std::vector<uint8_t>
                 if (destDir.empty() || ec) {
                     ec.clear();
 #ifdef _WIN32
-                    // Use wide-char environment lookups to avoid ANSI issues.
                     wchar_t wbuf[MAX_PATH]{};
                     if (GetEnvironmentVariableW(L"TEMP", wbuf, MAX_PATH) > 0) {
                         destDir = wideToUtf8(wbuf) + "\\ZeroBorders";
@@ -400,11 +492,11 @@ void FileTransferManager::handleMessage(MsgType type, const std::vector<uint8_t>
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
                     pendingOffers_[msg.transferId] = {
-                        std::move(msg.entries), msg.totalSize, msg.flags};
+                        std::move(msg.entries), msg.totalSize, msg.flags, destDir};
                 }
                 accept(msg.transferId, destDir);
 
-                if (offerCb_) offerCb_(msg.transferId, {}, msg.totalSize);
+                if (offerCb_) offerCb_(msg.transferId, {}, msg.totalSize, destDir, msg.flags);
             } catch (const std::exception& e) {
                 ZB_LOG_ERROR("Exception while processing file offer: {}", e.what());
             }
@@ -458,7 +550,32 @@ void FileTransferManager::handleMessage(MsgType type, const std::vector<uint8_t>
         case MsgType::FileChunkAck: {
             FileChunkAckMsg msg;
             if (!parseFileChunkAck(payload, msg)) return;
-            // Currently using simple send-and-forget; ACKs are informational.
+            // Update the sender's flow-control window and wake the sender
+            // thread if it is waiting for room to send more chunks.
+            SenderState* s = nullptr;
+            uint64_t cumulativeAcked = 0;
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                auto it = senders_.find(msg.transferId);
+                if (it != senders_.end()) {
+                    s = &it->second;
+                    // Compute transfer-wide acked bytes: sum of completed
+                    // (preceding) entries plus the current entry's offset.
+                    for (uint32_t i = 0; i < msg.entryIndex && i < s->entries.size(); ++i) {
+                        if (!s->entries[i].isDirectory)
+                            cumulativeAcked += s->entries[i].size;
+                    }
+                    if (msg.entryIndex < s->entries.size())
+                        cumulativeAcked += msg.ackedOffset;
+                }
+            }
+            if (s) {
+                std::lock_guard<std::mutex> a(s->ackMutex);
+                if (cumulativeAcked > s->ackedBytes)
+                    s->ackedBytes = cumulativeAcked;
+                s->lastAckTime = std::chrono::steady_clock::now();
+                s->ackCv.notify_all();
+            }
             break;
         }
 
@@ -557,6 +674,20 @@ void FileTransferManager::senderThread(uint64_t transferId,
                                         const std::string& /*destDir*/) {
     ZB_LOG_INFO("Sender thread started for transfer {}", transferId);
 
+    // Obtain a stable pointer to our state. It remains valid for the lifetime
+    // of this thread because cancelAll() joins the thread before erasing the
+    // state, and the accept-timeout watchdog only erases inactive senders.
+    SenderState* self = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        auto it = senders_.find(transferId);
+        if (it != senders_.end()) self = &it->second;
+    }
+    if (!self) {
+        ZB_LOG_ERROR("Sender thread: state for transfer {} vanished", transferId);
+        return;
+    }
+
     auto markFinished = [this, transferId]() {
         std::lock_guard<std::mutex> lk(mutex_);
         auto it = senders_.find(transferId);
@@ -564,6 +695,12 @@ void FileTransferManager::senderThread(uint64_t transferId,
             it->second.active = false;
             it->second.finished = true;
         }
+    };
+
+    auto isActive = [this, transferId]() -> bool {
+        std::lock_guard<std::mutex> lk(mutex_);
+        auto it = senders_.find(transferId);
+        return it != senders_.end() && it->second.active.load();
     };
 
     bool success = false;
@@ -582,16 +719,10 @@ void FileTransferManager::senderThread(uint64_t transferId,
             const auto& e = entries[entryIdx];
             if (e.isDirectory) continue;
 
-            // Check if we should still be active.
-            {
-                std::lock_guard<std::mutex> lk(mutex_);
-                auto it = senders_.find(transferId);
-                if (it == senders_.end() || !it->second.active.load()) {
-                    ZB_LOG_WARN("Transfer {} cancelled", transferId);
-                    markFinished();
-                    if (completeCb_) completeCb_(transferId, false, "已取消");
-                    return;
-                }
+            if (!isActive()) {
+                ZB_LOG_WARN("Transfer {} cancelled", transferId);
+                if (completeCb_) completeCb_(transferId, false, "已取消");
+                return;
             }
 
             if (entryIdx >= entryPaths.size()) {
@@ -611,20 +742,40 @@ void FileTransferManager::senderThread(uint64_t transferId,
 
             uint64_t offset = 0;
             while (file) {
-                {
-                    std::lock_guard<std::mutex> lk(mutex_);
-                    auto it = senders_.find(transferId);
-                    if (it == senders_.end() || !it->second.active.load()) {
-                        ZB_LOG_WARN("Transfer {} cancelled mid-stream", transferId);
-                        markFinished();
-                        if (completeCb_) completeCb_(transferId, false, "已取消");
-                        return;
-                    }
+                if (!isActive()) {
+                    ZB_LOG_WARN("Transfer {} cancelled mid-stream", transferId);
+                    markFinished();
+                    if (completeCb_) completeCb_(transferId, false, "已取消");
+                    return;
                 }
 
                 file.read(reinterpret_cast<char*>(buf.data()), kChunkSize);
                 auto bytesRead = static_cast<uint32_t>(file.gcount());
                 if (bytesRead == 0) break;
+
+                // Flow control: wait until the receiver has acknowledged
+                // enough data that our in-flight window has room. This also
+                // acts as a liveness check — if no ACK arrives within the
+                // timeout the transfer is aborted.
+                {
+                    std::unique_lock<std::mutex> a(self->ackMutex);
+                    while (self->active.load() &&
+                           (totalSent - self->ackedBytes) >= kSendWindowBytes) {
+                        auto r = self->ackCv.wait_for(a,
+                            std::chrono::seconds(kAckTimeoutSec));
+                        if (r == std::cv_status::timeout) {
+                            // Check whether we made progress to avoid a
+                            // spurious timeout on very slow links.
+                            if ((totalSent - self->ackedBytes) >= kSendWindowBytes) {
+                                ZB_LOG_ERROR("Transfer {} ACK timeout", transferId);
+                                markFinished();
+                                if (completeCb_) completeCb_(transferId, false,
+                                    "等待对端确认超时，连接可能已断开");
+                                return;
+                            }
+                        }
+                    }
+                }
 
                 FileChunkMsg chunk;
                 chunk.transferId = transferId;
@@ -633,7 +784,13 @@ void FileTransferManager::senderThread(uint64_t transferId,
                 chunk.data.assign(buf.data(), buf.data() + bytesRead);
 
                 if (sendCb_) {
-                    sendCb_(MsgType::FileChunk, serializeFileChunk(chunk));
+                    if (!sendCb_(MsgType::FileChunk, serializeFileChunk(chunk))) {
+                        ZB_LOG_ERROR("Transfer {} send failed (connection lost)", transferId);
+                        markFinished();
+                        if (completeCb_) completeCb_(transferId, false,
+                            "连接已断开，传输中断");
+                        return;
+                    }
                 }
 
                 offset += bytesRead;
@@ -656,10 +813,15 @@ void FileTransferManager::senderThread(uint64_t transferId,
         complete.message = "ok";
 
         if (sendCb_) {
-            sendCb_(MsgType::TransferComplete, serializeTransferComplete(complete));
+            if (!sendCb_(MsgType::TransferComplete, serializeTransferComplete(complete))) {
+                ZB_LOG_ERROR("Transfer {} failed to send completion", transferId);
+                errMsg = "连接已断开，传输可能不完整";
+            } else {
+                success = true;
+            }
+        } else {
+            success = true;
         }
-
-        success = true;
     } catch (const std::exception& e) {
         ZB_LOG_ERROR("Sender thread exception for transfer {}: {}", transferId, e.what());
         errMsg = e.what();

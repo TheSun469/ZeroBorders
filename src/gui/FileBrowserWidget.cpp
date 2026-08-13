@@ -169,29 +169,43 @@ FileBrowserWidget::FileBrowserWidget(Mode mode, QWidget* parent)
     connect(table_, &QTableView::doubleClicked,
             this, &FileBrowserWidget::onDoubleClicked);
 
-    // Right-click context menu for file transfer.
+    // Right-click context menu.
     table_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(table_, &QTableView::customContextMenuRequested,
             this, [this](const QPoint& pos) {
         QModelIndex index = table_->indexAt(pos);
-        if (!index.isValid()) return;
-        // Ensure the right-clicked row is selected.
-        if (!table_->selectionModel()->isRowSelected(index.row(), index.parent())) {
-            table_->selectRow(index.row());
-        }
-        if (selectedPaths().isEmpty()) return;
 
         QMenu menu(this);
-        QString actionText = (mode_ == Mode::Local)
-            ? QStringLiteral("上传")
-            : QStringLiteral("下载");
-        menu.addAction(actionText, [this] { emit transferRequested(); });
-        menu.addAction(QStringLiteral("复制文件地址"), [this] {
-            QStringList paths = selectedFullPaths();
-            if (!paths.isEmpty()) {
-                QApplication::clipboard()->setText(paths.join(QStringLiteral("\n")));
+
+        // File operations on selected rows.
+        if (index.isValid()) {
+            if (!table_->selectionModel()->isRowSelected(index.row(), index.parent())) {
+                table_->selectRow(index.row());
             }
-        });
+            if (!selectedPaths().isEmpty()) {
+                menu.addAction(QStringLiteral("传输"), [this] { emit transferRequested(); });
+                menu.addAction(QStringLiteral("复制文件地址"), [this] {
+                    QStringList paths = selectedFullPaths();
+                    if (!paths.isEmpty()) {
+                        QApplication::clipboard()->setText(paths.join(QStringLiteral("\n")));
+                    }
+                });
+                // Local-only file operations.
+                if (mode_ == Mode::Local) {
+                    menu.addSeparator();
+                    menu.addAction(QStringLiteral("删除"), [this] { emit deleteRequested(); });
+                    menu.addAction(QStringLiteral("重命名"), [this] { emit renameRequested(); });
+                }
+                menu.addSeparator();
+            }
+        }
+
+        // "新建文件夹" and "刷新" always available (local new folder only).
+        if (mode_ == Mode::Local) {
+            menu.addAction(QStringLiteral("新建文件夹"), [this] { emit newFolderRequested(); });
+        }
+        menu.addAction(QStringLiteral("刷新"), [this] { emit refreshRequested(); });
+
         menu.exec(table_->viewport()->mapToGlobal(pos));
     });
 

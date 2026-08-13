@@ -75,6 +75,14 @@ signals:
     void filesActivated(const QStringList& paths);
     // Emitted when the user right-clicks and selects "传输".
     void transferRequested();
+    // Emitted when the user right-clicks and selects "刷新".
+    void refreshRequested();
+    // Emitted when the user right-clicks and selects "删除" (local only).
+    void deleteRequested();
+    // Emitted when the user right-clicks and selects "重命名" (local only).
+    void renameRequested();
+    // Emitted when the user right-clicks and selects "新建文件夹" (local only).
+    void newFolderRequested();
 
 private slots:
     void onUp();

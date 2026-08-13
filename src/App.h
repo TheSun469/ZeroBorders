@@ -83,7 +83,10 @@ public:
                             const std::string& destDir);
 
     // File transfer (sender). Returns 0 on failure.
-    uint64_t sendFiles(const std::vector<std::string>& paths);
+    // destDir: target directory on the receiver (empty = receiver default).
+    uint64_t sendFiles(const std::vector<std::string>& paths,
+                       uint8_t flags = 0,
+                       const std::string& destDir = "");
 
     // Receiver: accept/reject an incoming offer (called from UI after prompt).
     void acceptTransfer(uint64_t id, const std::string& destDir);

@@ -235,6 +235,7 @@ struct FileOfferMsg {
     uint64_t totalSize = 0;
     std::vector<TransferEntry> entries;
     uint8_t flags = 0;  // bit 0: clipboard transfer (auto-accept, put in clipboard)
+    std::string destDir; // UTF-8 target directory on receiver (empty = receiver default)
 };
 
 struct FileAcceptMsg {

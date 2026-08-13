@@ -271,7 +271,7 @@ void NetworkClient::scheduleReconnect() {
     });
 }
 
-void NetworkClient::sendControl(MsgType t, const std::vector<uint8_t>& p) {
+bool NetworkClient::sendControl(MsgType t, const std::vector<uint8_t>& p) {
     // Copy under the lock, send without holding it. See NetworkServer for the
     // deadlock rationale (send() -> fireDisconnect -> postTeardown -> join).
     std::shared_ptr<TcpTransport> ctrl;
@@ -279,16 +279,18 @@ void NetworkClient::sendControl(MsgType t, const std::vector<uint8_t>& p) {
         std::lock_guard<std::mutex> lk(stateMutex_);
         ctrl = ctrl_;
     }
-    if (ctrl) ctrl->send(t, p);
+    if (ctrl) return ctrl->send(t, p);
+    return false;
 }
 
-void NetworkClient::sendData(MsgType t, const std::vector<uint8_t>& p) {
+bool NetworkClient::sendData(MsgType t, const std::vector<uint8_t>& p) {
     std::shared_ptr<TcpTransport> data;
     {
         std::lock_guard<std::mutex> lk(stateMutex_);
         data = data_;
     }
-    if (data) data->send(t, p);
+    if (data) return data->send(t, p);
+    return false;
 }
 
 } // namespace zb

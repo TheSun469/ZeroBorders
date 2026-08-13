@@ -72,6 +72,12 @@ private:
     // WM_CLIPBOARDUPDATE notifications that fire while formats are populated).
     uint32_t lastSeqNo_ = 0;
 
+    // Last digest sent to the peer. Windows fires multiple WM_CLIPBOARDUPDATE
+    // events for a single copy operation (as different formats are populated
+    // via delayed rendering). Without this check, the same file(s) would be
+    // sent multiple times.
+    TokenHash lastSentDigest_{};
+
     // Echo prevention: ring buffer of recent write digests.
     static constexpr size_t kEchoCacheSize = 4;
     TokenHash echoCache_[kEchoCacheSize]{};

@@ -6,22 +6,30 @@
 #include <QApplication>
 #include <QBoxLayout>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QFormLayout>
 #include <QGroupBox>
 #include <QIcon>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QStatusBar>
 #include <QStringList>
 #include <QSystemTrayIcon>
 #include <QScreen>
@@ -30,6 +38,11 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QFileSystemModel>
+
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 namespace zb {
 
@@ -40,6 +53,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     resize(720, 760);
 
     buildUi();
+    buildMenuBar();
     loadConfig();
 
     // Wire App signals to GUI slots (auto/queued connections cross threads).
@@ -57,74 +71,30 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     app_.installLogSink();
     buildTrayIcon();
-    roleLabel_->setText(QStringLiteral("本机角色：未连接"));
+    roleLabel_->setText(QStringLiteral("角色：未连接"));
     ZB_LOG_INFO("ZeroBorders GUI ready");
 }
 
 MainWindow::~MainWindow() = default;
 
+// ---------------------------------------------------------------------------
+// UI construction
+// ---------------------------------------------------------------------------
+
 void MainWindow::buildUi() {
     auto* central = new QWidget(this);
     auto* root = new QVBoxLayout(central);
-    root->setContentsMargins(8, 8, 8, 8);
+    root->setContentsMargins(8, 8, 8, 4);
     root->setSpacing(6);
 
-    // ---- Connection group ------------------------------------------------
+    // ---- Connection bar (compact: just start button) --------------------
     connGroup_ = new QGroupBox(QStringLiteral("连接"), central);
-    auto* connLayout = new QGridLayout(connGroup_);
-
-    auto* codeLabel = new QLabel(QStringLiteral("识别码："), connGroup_);
-    codeEdit_ = new QLineEdit(connGroup_);
-    codeEdit_->setPlaceholderText(QStringLiteral("两台电脑输入相同的识别码即可自动配对"));
-    codeEdit_->setEchoMode(QLineEdit::Password);
-
-    auto* usernameLabel = new QLabel(QStringLiteral("用户名："), connGroup_);
-    usernameEdit_ = new QLineEdit(connGroup_);
-    usernameEdit_->setPlaceholderText(QStringLiteral("两台电脑输入相同的用户名（双重保险）"));
-
-    auto* rolePrefLabel = new QLabel(QStringLiteral("控制方式："), connGroup_);
-    rolePrefCombo_ = new QComboBox(connGroup_);
-    rolePrefCombo_->addItem(QStringLiteral("自动选择"), 0);
-    rolePrefCombo_->addItem(QStringLiteral("本机控制对端"), 1);
-    rolePrefCombo_->addItem(QStringLiteral("对端控制本机"), 2);
-    rolePrefCombo_->setToolTip(QStringLiteral("选择鼠标键盘在哪台电脑上操作。冲突时自动选举。"));
-
+    auto* connLayout = new QHBoxLayout(connGroup_);
     startBtn_ = new QPushButton(QStringLiteral("开始连接"), connGroup_);
     startBtn_->setObjectName(QStringLiteral("startBtn_"));
-    statusLabel_ = new QLabel(QStringLiteral("空闲"), connGroup_);
-    statusLabel_->setStyleSheet("color: #666;");
-    peerLabel_ = new QLabel("", connGroup_);
-    roleLabel_ = new QLabel(QStringLiteral("本机角色：未连接"), connGroup_);
-    roleLabel_->setStyleSheet("color: #236; font-weight: bold;");
-
-    connLayout->addWidget(codeLabel, 0, 0);
-    connLayout->addWidget(codeEdit_, 0, 1, 1, 3);
-    connLayout->addWidget(usernameLabel, 1, 0);
-    connLayout->addWidget(usernameEdit_, 1, 1, 1, 3);
-    connLayout->addWidget(rolePrefLabel, 2, 0);
-    connLayout->addWidget(rolePrefCombo_, 2, 1, 1, 3);
-    connLayout->addWidget(startBtn_, 3, 0);
-    connLayout->addWidget(statusLabel_, 3, 1, 1, 2);
-    connLayout->addWidget(peerLabel_, 3, 3);
-    connLayout->addWidget(roleLabel_, 4, 0, 1, 4);
-
-    // ---- Settings group --------------------------------------------------
-    settingsGroup_ = new QGroupBox(QStringLiteral("设置"), central);
-    auto* setLayout = new QGridLayout(settingsGroup_);
-
-    autoStartCheck_ = new QCheckBox(QStringLiteral("开机自动启动"), settingsGroup_);
-    minimizeToTrayCheck_ = new QCheckBox(QStringLiteral("关闭窗口时最小化到托盘"), settingsGroup_);
-    setLayout->addWidget(autoStartCheck_, 0, 0);
-    setLayout->addWidget(minimizeToTrayCheck_, 0, 1);
-
-    // Put connection + settings in a fixed top container.
-    auto* topContainer = new QWidget(central);
-    auto* topLayout = new QVBoxLayout(topContainer);
-    topLayout->setContentsMargins(0, 0, 0, 0);
-    topLayout->setSpacing(6);
-    topLayout->addWidget(connGroup_);
-    topLayout->addWidget(settingsGroup_);
-    root->addWidget(topContainer);
+    connLayout->addWidget(startBtn_);
+    connLayout->addStretch();
+    root->addWidget(connGroup_);
 
     // ---- Vertical splitter for resizable sections ------------------------
     mainSplitter_ = new QSplitter(Qt::Vertical, central);
@@ -135,7 +105,6 @@ void MainWindow::buildUi() {
     layoutGroup_ = new QGroupBox(mainSplitter_);
     auto* layOuter = new QVBoxLayout(layoutGroup_);
 
-    // Title bar with collapse button.
     auto* layTitleRow = new QHBoxLayout();
     layTitleRow->setContentsMargins(0, 0, 0, 0);
     auto* layTitleLabel = new QLabel(
@@ -160,8 +129,6 @@ void MainWindow::buildUi() {
     transferGroup_ = new QGroupBox(QStringLiteral("文件传输"), mainSplitter_);
     auto* transLayout = new QVBoxLayout(transferGroup_);
 
-    // Two browser panels side by side in a horizontal splitter so the user
-    // can drag the divider to adjust the gap between local and remote.
     auto* browserSplitter = new QSplitter(Qt::Horizontal, transferGroup_);
     browserSplitter->setChildrenCollapsible(false);
     browserSplitter->setHandleWidth(5);
@@ -196,14 +163,6 @@ void MainWindow::buildUi() {
 
     transLayout->addWidget(browserSplitter, 1);
 
-    // Button row: refresh remote only (upload/download via right-click).
-    auto* btnRow = new QHBoxLayout();
-    btnRow->addStretch();
-    refreshRemoteBtn_ = new QPushButton(QStringLiteral("刷新远程"), transferGroup_);
-    refreshRemoteBtn_->setEnabled(false);
-    btnRow->addWidget(refreshRemoteBtn_);
-    transLayout->addLayout(btnRow);
-
     mainSplitter_->addWidget(transferGroup_);
 
     // ---- Log --------------------------------------------------------------
@@ -214,28 +173,32 @@ void MainWindow::buildUi() {
     logView_->setMaximumBlockCount(1000);
     logView_->setStyleSheet(
         "QPlainTextEdit { font-family: Consolas, 'Courier New', monospace; font-size: 12px; }");
-    clearLogBtn_ = new QPushButton(QStringLiteral("清空日志"), logGroup);
-    auto* logBtnRow = new QHBoxLayout();
-    logBtnRow->addStretch();
-    logBtnRow->addWidget(clearLogBtn_);
     logLayout->addWidget(logView_);
-    logLayout->addLayout(logBtnRow);
     mainSplitter_->addWidget(logGroup);
 
-    // Splitter stretch: layout (small), transfer (medium), log (medium).
     mainSplitter_->setStretchFactor(0, 0);
     mainSplitter_->setStretchFactor(1, 3);
     mainSplitter_->setStretchFactor(2, 2);
-    mainSplitter_->setSizes({120, 320, 200});
+    mainSplitter_->setSizes({260, 300, 140});
 
     root->addWidget(mainSplitter_, 1);
 
     setCentralWidget(central);
 
+    // ---- Status bar -------------------------------------------------------
+    auto* sb = statusBar();
+    statusLabel_ = new QLabel(QStringLiteral("空闲"), sb);
+    statusLabel_->setStyleSheet("color: #666; padding: 0 8px;");
+    roleLabel_ = new QLabel(QStringLiteral("角色：未连接"), sb);
+    roleLabel_->setStyleSheet("color: #236; font-weight: bold; padding: 0 8px;");
+    peerLabel_ = new QLabel("", sb);
+    peerLabel_->setStyleSheet("color: #555; padding: 0 8px;");
+    sb->addWidget(statusLabel_);
+    sb->addWidget(roleLabel_);
+    sb->addPermanentWidget(peerLabel_);
+
     // ---- Connections ------------------------------------------------------
     connect(startBtn_, &QPushButton::clicked, this, &MainWindow::onStartStop);
-    connect(refreshRemoteBtn_, &QPushButton::clicked, this, &MainWindow::onRefreshRemote);
-    connect(clearLogBtn_, &QPushButton::clicked, logView_, &QPlainTextEdit::clear);
     connect(layoutCollapseBtn_, &QToolButton::clicked, this, [this] {
         setLayoutCollapsed(!layoutCollapsed_);
     });
@@ -243,22 +206,152 @@ void MainWindow::buildUi() {
             this, &MainWindow::onLocalPathChanged);
     connect(remoteBrowser_, &FileBrowserWidget::navigateRequested,
             this, &MainWindow::onNavigateRemote);
-    // 远程路径下拉树懒加载：请求对端返回目录内容（仅填充树，不切换主表）
     connect(remoteBrowser_, &FileBrowserWidget::fetchRequested,
             this, [this](const QString& p) {
         if (app_.isRunning() && app_.isConnected())
             app_.requestRemoteDirList(p.toStdString());
     });
-    // Right-click transfer: local → upload, remote → download.
     connect(localBrowser_, &FileBrowserWidget::transferRequested,
             this, &MainWindow::onSendSelected);
     connect(remoteBrowser_, &FileBrowserWidget::transferRequested,
             this, &MainWindow::onDownloadSelected);
-    connect(autoStartCheck_, &QCheckBox::toggled, this, &MainWindow::onToggleAutoStart);
+    connect(localBrowser_, &FileBrowserWidget::refreshRequested,
+            this, &MainWindow::onRefreshLocal);
+    connect(remoteBrowser_, &FileBrowserWidget::refreshRequested,
+            this, &MainWindow::onRefreshRemote);
+    connect(localBrowser_, &FileBrowserWidget::deleteRequested,
+            this, &MainWindow::onDeleteSelected);
+    connect(localBrowser_, &FileBrowserWidget::renameRequested,
+            this, &MainWindow::onRenameSelected);
+    connect(localBrowser_, &FileBrowserWidget::newFolderRequested,
+            this, &MainWindow::onNewFolder);
 
-    // Layout widget: persist and push live while connected.
     connect(layoutWidget_, &DeviceLayoutWidget::layoutChanged,
             this, &MainWindow::onLayoutChanged);
+}
+
+// ---------------------------------------------------------------------------
+// Menu bar
+// ---------------------------------------------------------------------------
+
+void MainWindow::buildMenuBar() {
+    auto* mb = menuBar();
+
+    // ---- 文件菜单 ----
+    auto* fileMenu = mb->addMenu(QStringLiteral("文件"));
+
+    auto* newFolderAct = fileMenu->addAction(QStringLiteral("新建文件夹"));
+    newFolderAct->setShortcut(QKeySequence::New);
+    connect(newFolderAct, &QAction::triggered, this, &MainWindow::onNewFolder);
+
+    auto* newFileAct = fileMenu->addAction(QStringLiteral("新建文件"));
+    connect(newFileAct, &QAction::triggered, this, &MainWindow::onNewFile);
+
+    fileMenu->addSeparator();
+
+    auto* deleteAct = fileMenu->addAction(QStringLiteral("删除"));
+    deleteAct->setShortcut(QKeySequence::Delete);
+    connect(deleteAct, &QAction::triggered, this, &MainWindow::onDeleteSelected);
+
+    auto* renameAct = fileMenu->addAction(QStringLiteral("重命名"));
+    renameAct->setShortcut(QKeySequence("F2"));
+    connect(renameAct, &QAction::triggered, this, &MainWindow::onRenameSelected);
+
+    fileMenu->addSeparator();
+
+    auto* copyPathAct = fileMenu->addAction(QStringLiteral("复制文件地址"));
+    connect(copyPathAct, &QAction::triggered, this, &MainWindow::onCopyPath);
+
+    fileMenu->addSeparator();
+
+    auto* quitAct = fileMenu->addAction(QStringLiteral("退出"));
+    quitAct->setShortcut(QKeySequence::Quit);
+    connect(quitAct, &QAction::triggered, this, &MainWindow::onQuitApp);
+
+    // ---- 设置菜单 ----
+    auto* settingsMenu = mb->addMenu(QStringLiteral("设置"));
+    auto* openSettingsAct = settingsMenu->addAction(QStringLiteral("配置..."));
+    connect(openSettingsAct, &QAction::triggered, this, &MainWindow::onOpenSettings);
+}
+
+// ---------------------------------------------------------------------------
+// Settings dialog
+// ---------------------------------------------------------------------------
+
+void MainWindow::onOpenSettings() {
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("设置"));
+    dlg.setMinimumWidth(420);
+
+    auto* layout = new QVBoxLayout(&dlg);
+
+    // ---- 认证分类 ----
+    auto* authGroup = new QGroupBox(QStringLiteral("认证"), &dlg);
+    auto* authForm = new QFormLayout(authGroup);
+    auto* codeEdit = new QLineEdit(authGroup);
+    codeEdit->setEchoMode(QLineEdit::Password);
+    codeEdit->setPlaceholderText(QStringLiteral("两台电脑输入相同的识别码"));
+    codeEdit->setText(QString::fromStdString(config_.pairingCode));
+    auto* usernameEdit = new QLineEdit(authGroup);
+    usernameEdit->setPlaceholderText(QStringLiteral("两台电脑输入相同的用户名"));
+    usernameEdit->setText(QString::fromStdString(config_.username));
+    authForm->addRow(QStringLiteral("识别码："), codeEdit);
+    authForm->addRow(QStringLiteral("用户名："), usernameEdit);
+    layout->addWidget(authGroup);
+
+    // ---- 连接分类 ----
+    auto* connGroup = new QGroupBox(QStringLiteral("连接"), &dlg);
+    auto* connForm = new QFormLayout(connGroup);
+    auto* rolePrefCombo = new QComboBox(connGroup);
+    rolePrefCombo->addItem(QStringLiteral("自动选择"), 0);
+    rolePrefCombo->addItem(QStringLiteral("本机控制对端"), 1);
+    rolePrefCombo->addItem(QStringLiteral("对端控制本机"), 2);
+    int prefIdx = rolePrefCombo->findData(config_.rolePreference);
+    rolePrefCombo->setCurrentIndex(prefIdx >= 0 ? prefIdx : 0);
+    connForm->addRow(QStringLiteral("控制方式："), rolePrefCombo);
+    layout->addWidget(connGroup);
+
+    // ---- 系统分类 ----
+    auto* sysGroup = new QGroupBox(QStringLiteral("系统"), &dlg);
+    auto* sysForm = new QFormLayout(sysGroup);
+    auto* autoStartCheck = new QCheckBox(QStringLiteral("开机自动启动"), sysGroup);
+    autoStartCheck->setChecked(ConfigManager::instance().isAutoStartEnabled());
+    auto* minimizeCheck = new QCheckBox(QStringLiteral("关闭窗口时最小化到托盘"), sysGroup);
+    minimizeCheck->setChecked(config_.startMinimized);
+    sysForm->addRow(autoStartCheck);
+    sysForm->addRow(minimizeCheck);
+    layout->addWidget(sysGroup);
+
+    // ---- Buttons ----
+    auto* btnBox = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    layout->addWidget(btnBox);
+
+    if (dlg.exec() == QDialog::Accepted) {
+        config_.pairingCode = codeEdit->text().toStdString();
+        config_.username = usernameEdit->text().toStdString();
+        config_.rolePreference = rolePrefCombo->currentData().toInt();
+        config_.startMinimized = minimizeCheck->isChecked();
+
+        // Auto-start toggle
+        bool wantAuto = autoStartCheck->isChecked();
+        bool hasAuto = ConfigManager::instance().isAutoStartEnabled();
+        if (wantAuto != hasAuto) {
+            if (!ConfigManager::instance().setAutoStart(wantAuto)) {
+                QMessageBox::warning(this, QStringLiteral("零界 ZeroBorders"),
+                    QStringLiteral("无法修改开机自启，请尝试以管理员身份运行。"));
+            }
+        }
+
+        saveConfig();
+
+        // If running, update role label text
+        if (app_.isRunning()) {
+            setRunningUi(true);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,15 +362,8 @@ void MainWindow::loadConfig() {
     config_ = AppConfig{};
     ConfigManager::instance().load(config_);
 
-    codeEdit_->setText(QString::fromStdString(config_.pairingCode));
-    usernameEdit_->setText(QString::fromStdString(config_.username));
-
-    int prefIdx = rolePrefCombo_->findData(config_.rolePreference);
-    rolePrefCombo_->setCurrentIndex(prefIdx >= 0 ? prefIdx : 0);
-
     layoutWidget_->setLayout(layoutFromString(config_.layout));
 
-    // Initialize local screen resolution for the layout canvas.
     if (QScreen* screen = QGuiApplication::primaryScreen()) {
         QSize sz = screen->size();
         layoutWidget_->setLocalResolution(
@@ -285,8 +371,6 @@ void MainWindow::loadConfig() {
             static_cast<uint32_t>(sz.height()));
     }
 
-    // Initialize local receive directory. If none configured, default to
-    // TEMP/ZeroBorders.
     QString localDir = QString::fromStdString(config_.receiveDir);
     if (localDir.isEmpty()) {
         localDir = QDir::toNativeSeparators(QDir::tempPath())
@@ -294,11 +378,6 @@ void MainWindow::loadConfig() {
     }
     localBrowser_->setPath(localDir);
     remoteBrowser_->setReadOnly(true);
-
-    minimizeToTrayCheck_->setChecked(config_.startMinimized);
-    autoStartCheck_->blockSignals(true);
-    autoStartCheck_->setChecked(ConfigManager::instance().isAutoStartEnabled());
-    autoStartCheck_->blockSignals(false);
 }
 
 void MainWindow::saveConfig() {
@@ -308,14 +387,8 @@ void MainWindow::saveConfig() {
 
 AppConfig MainWindow::collectConfig() const {
     AppConfig c = config_;
-    c.pairingCode = codeEdit_->text().toStdString();
-    c.username = usernameEdit_->text().toStdString();
-    c.rolePreference = rolePrefCombo_->currentData().toInt();
-
     c.layout = layoutToString(layoutWidget_->layout());
-
-    c.receiveDir = localBrowser_->path().toStdString();
-    c.startMinimized = minimizeToTrayCheck_->isChecked();
+    c.receiveDir = QDir::toNativeSeparators(localBrowser_->path()).toStdString();
     return c;
 }
 
@@ -324,14 +397,7 @@ AppConfig MainWindow::collectConfig() const {
 // ---------------------------------------------------------------------------
 
 void MainWindow::setRunningUi(bool running) {
-    codeEdit_->setEnabled(!running);
-    usernameEdit_->setEnabled(!running);
-    rolePrefCombo_->setEnabled(!running);
-    // Local browser stays enabled so user can browse/select files while connected.
-    localBrowser_->setReadOnly(false);
-    remoteBrowser_->setReadOnly(!running || !app_.isConnected());
     startBtn_->setText(running ? QStringLiteral("断开连接") : QStringLiteral("开始连接"));
-    refreshRemoteBtn_->setEnabled(running && app_.isConnected());
     if (startStopAction_) startStopAction_->setText(running ? QStringLiteral("断开") : QStringLiteral("开始连接"));
 }
 
@@ -343,19 +409,16 @@ void MainWindow::setLayoutCollapsed(bool collapsed) {
     if (sizes.size() < 3) return;
 
     if (collapsed) {
-        // Remember current height before collapsing (but only if it has real size).
+        // Remember current height before collapsing.
         if (sizes[0] > 40) savedLayoutHeight_ = sizes[0];
-        if (layoutWidget_) layoutWidget_->hide();
+        if (layoutWidget_) layoutWidget_->setVisible(false);
         if (layoutCollapseBtn_) layoutCollapseBtn_->setArrowType(Qt::RightArrow);
-        // Force the group box to shrink to its title-only size by capping max height.
-        QApplication::processEvents();
-        int titleH = layoutGroup_->minimumSizeHint().height();
-        // minimumSizeHint may still include the hidden widget; estimate from style.
-        if (titleH > 60) titleH = qMax(36, layoutGroup_->fontMetrics().height() + 16);
-        layoutGroup_->setMaximumHeight(titleH);
+
+        // Collapse to minimal height (just title bar).
+        int titleH = layoutGroup_->fontMetrics().height() + 24;
         int freed = sizes[0] - titleH;
+        if (freed < 0) freed = 0;
         sizes[0] = titleH;
-        // Give freed space proportionally to the other two sections.
         int other = sizes[1] + sizes[2];
         if (other > 0) {
             sizes[1] += freed * sizes[1] / other;
@@ -365,15 +428,13 @@ void MainWindow::setLayoutCollapsed(bool collapsed) {
         }
         mainSplitter_->setSizes(sizes);
     } else {
-        layoutGroup_->setMaximumHeight(QWIDGETSIZE_MAX);
-        if (layoutWidget_) layoutWidget_->show();
+        if (layoutWidget_) layoutWidget_->setVisible(true);
         if (layoutCollapseBtn_) layoutCollapseBtn_->setArrowType(Qt::DownArrow);
-        QApplication::processEvents();
-        // Restore saved height, taking it from the other sections.
+
         int targetH = savedLayoutHeight_;
         int available = sizes[1] + sizes[2];
         if (targetH > available + sizes[0]) targetH = available + sizes[0] - 40;
-        if (targetH < 80) targetH = 120;
+        if (targetH < 200) targetH = 260;
         int delta = targetH - sizes[0];
         sizes[0] = targetH;
         int other = sizes[1] + sizes[2];
@@ -395,19 +456,19 @@ void MainWindow::onStartStop() {
     if (app_.isRunning()) {
         app_.stop();
         setRunningUi(false);
-        roleLabel_->setText(QStringLiteral("本机角色：未连接"));
+        roleLabel_->setText(QStringLiteral("角色：未连接"));
         return;
     }
 
-    AppConfig cfg = collectConfig();
-    if (cfg.pairingCode.empty()) {
+    // Pull latest config from settings dialog fields
+    if (config_.pairingCode.empty()) {
         QMessageBox::warning(this, QStringLiteral("零界 ZeroBorders"),
-                             QStringLiteral("请输入识别码。"));
+                             QStringLiteral("请先在 设置 →配置 中输入识别码。"));
         return;
     }
-    if (cfg.username.empty()) {
+    if (config_.username.empty()) {
         QMessageBox::warning(this, QStringLiteral("零界 ZeroBorders"),
-                             QStringLiteral("请输入用户名。"));
+                             QStringLiteral("请先在 设置 →配置 中输入用户名。"));
         return;
     }
     saveConfig();
@@ -415,23 +476,20 @@ void MainWindow::onStartStop() {
     setRunningUi(true);
     activeSide_ = 0;
     transferIncoming_ = false;
-    roleLabel_->setText(QStringLiteral("本机角色：正在自动选举..."));
+    roleLabel_->setText(QStringLiteral("角色：正在选举..."));
 
-    // Automatic mode: discover a peer with the same pairing code and elect
-    // roles automatically — no manual server/client selection needed.
-    app_.startAuto(cfg);
+    app_.startAuto(config_);
 }
 
 void MainWindow::onRoleDetermined(bool isServer) {
-    roleLabel_->setText(isServer ? QStringLiteral("本机角色：控制端（键鼠在此）")
-                                 : QStringLiteral("本机角色：被控端"));
+    roleLabel_->setText(isServer ? QStringLiteral("角色：控制端")
+                                 : QStringLiteral("角色：被控端"));
 }
 
 void MainWindow::onSessionStopped() {
-    // Called when a session ends on its own (e.g. connection failure/timeout).
     QMetaObject::invokeMethod(this, [this] {
         setRunningUi(false);
-        roleLabel_->setText(QStringLiteral("本机角色：未连接"));
+        roleLabel_->setText(QStringLiteral("角色：未连接"));
     }, Qt::QueuedConnection);
 }
 
@@ -448,22 +506,24 @@ void MainWindow::onSendSelected() {
     QStringList selected = localBrowser_->selectedPaths();
     if (selected.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("零界 ZeroBorders"),
-                                 QStringLiteral("请在左侧本地文件列表中选择要发送的文件或文件夹。"));
+                                 QStringLiteral("请在本地文件列表中选择要上传的文件。"));
         return;
     }
+
+    QString remoteDir = QDir::toNativeSeparators(remoteBrowser_->path());
 
     std::vector<std::string> paths;
     paths.reserve(selected.size());
     for (const QString& p : selected) paths.push_back(p.toStdString());
 
-    uint64_t id = app_.sendFiles(paths);
+    uint64_t id = app_.sendFiles(paths, 0, remoteDir.toStdString());
     if (id == 0) {
         QMessageBox::warning(this, QStringLiteral("零界 ZeroBorders"),
                              QStringLiteral("启动文件传输失败。"));
         return;
     }
     currentTransferId_ = id;
-    activeSide_ = 1;  // local side (upload)
+    activeSide_ = 1;
     transferIncoming_ = false;
     localBrowser_->showProgress(QStringLiteral("正在上传 %1 个项目...").arg(selected.size()));
 }
@@ -477,17 +537,15 @@ void MainWindow::onDownloadSelected() {
     QStringList selected = remoteBrowser_->selectedPaths();
     if (selected.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("零界 ZeroBorders"),
-                                 QStringLiteral("请在右侧远程文件列表中选择要下载的文件或文件夹。"));
+                                 QStringLiteral("请在远程文件列表中选择要下载的文件。"));
         return;
     }
 
-    // Build full remote paths from current directory + selected names.
     QString remoteDir = remoteBrowser_->path();
 
     std::vector<std::string> remotePaths;
     remotePaths.reserve(selected.size());
     for (const QString& name : selected) {
-        // At root level, entries like "C:\" are already full paths.
         if (remoteDir.isEmpty()) {
             remotePaths.push_back(name.toStdString());
         } else {
@@ -508,9 +566,15 @@ void MainWindow::onDownloadSelected() {
 
     app_.requestRemoteFiles(remotePaths, localDir.toStdString());
     currentTransferId_ = 0;
-    activeSide_ = 2;  // remote side (download)
+    activeSide_ = 2;
     transferIncoming_ = false;
     remoteBrowser_->showProgress(QStringLiteral("正在下载 %1 个项目...").arg(selected.size()));
+}
+
+void MainWindow::onRefreshLocal() {
+    // QFileSystemModel auto-refreshes, but force a re-read of the current directory.
+    QString p = localBrowser_->path();
+    if (!p.isEmpty()) localBrowser_->setPath(p);
 }
 
 void MainWindow::onRefreshRemote() {
@@ -527,7 +591,6 @@ void MainWindow::onNavigateRemote(const QString& path) {
 void MainWindow::onRemoteDirListed(const QString& path, bool ok,
                                    const QVariantList& entries) {
     if (!ok) {
-        // 仅当失败的是当前浏览路径时才在主表显示错误
         if (path == remoteBrowser_->path())
             remoteBrowser_->showRemoteError(path, QStringLiteral("无法访问目录"));
         return;
@@ -541,13 +604,11 @@ void MainWindow::onRemoteDirListed(const QString& path, bool ok,
         e.name = m[QStringLiteral("name")].toString();
         e.size = m[QStringLiteral("size")].toULongLong();
         e.isDirectory = m[QStringLiteral("isDir")].toBool();
-        e.isDrive = isRoot && e.isDirectory;  // 根目录下的目录均为驱动器
+        e.isDrive = isRoot && e.isDirectory;
         e.modified = m[QStringLiteral("mtime")].toDateTime();
         dirEntries.push_back(e);
     }
-    // 始终把结果填充到下拉树缓存，方便用户在树中展开浏览
     remoteBrowser_->setRemoteTreeEntries(path, dirEntries);
-    // 仅当返回的是当前正在浏览的路径时才更新主表
     if (path == remoteBrowser_->path()) {
         remoteBrowser_->setRemoteEntries(path, dirEntries);
     }
@@ -575,10 +636,8 @@ void MainWindow::onTransferComplete(quint64 id, bool ok, const QString& msg) {
 
 void MainWindow::updateProgress(quint64 id, quint64 transferred, quint64 total) {
     if (total == 0) return;
-    // Track this transfer if none is currently tracked (covers downloads).
     if (currentTransferId_ == 0) {
         currentTransferId_ = id;
-        // Auto-detect: incoming transfer shows on local side.
         if (activeSide_ == 0) {
             transferIncoming_ = true;
             activeSide_ = 1;
@@ -600,6 +659,129 @@ void MainWindow::updateProgress(quint64 id, quint64 transferred, quint64 total) 
 }
 
 // ---------------------------------------------------------------------------
+// File operations (local)
+// ---------------------------------------------------------------------------
+
+void MainWindow::onNewFolder() {
+    QString dir = localBrowser_->path();
+    if (dir.isEmpty()) return;
+
+    bool ok = false;
+    QString name = QInputDialog::getText(this,
+        QStringLiteral("新建文件夹"),
+        QStringLiteral("文件夹名称："),
+        QLineEdit::Normal, QStringLiteral("新建文件夹"), &ok);
+    if (!ok || name.isEmpty()) return;
+
+    QString fullPath = dir;
+    if (!fullPath.endsWith(QLatin1Char('\\')) && !fullPath.endsWith(QLatin1Char('/')))
+        fullPath += QLatin1Char('\\');
+    fullPath += name;
+
+    QDir d;
+    if (!d.mkpath(fullPath)) {
+        QMessageBox::warning(this, QStringLiteral("零界 ZeroBorders"),
+                             QStringLiteral("无法创建文件夹。"));
+    }
+}
+
+void MainWindow::onNewFile() {
+    QString dir = localBrowser_->path();
+    if (dir.isEmpty()) return;
+
+    bool ok = false;
+    QString name = QInputDialog::getText(this,
+        QStringLiteral("新建文件"),
+        QStringLiteral("文件名称："),
+        QLineEdit::Normal, QStringLiteral("新建文件.txt"), &ok);
+    if (!ok || name.isEmpty()) return;
+
+    QString fullPath = dir;
+    if (!fullPath.endsWith(QLatin1Char('\\')) && !fullPath.endsWith(QLatin1Char('/')))
+        fullPath += QLatin1Char('\\');
+    fullPath += name;
+
+    QFile f(fullPath);
+    if (!f.open(QIODevice::WriteOnly)) {
+        QMessageBox::warning(this, QStringLiteral("零界 ZeroBorders"),
+                             QStringLiteral("无法创建文件。"));
+    }
+    f.close();
+}
+
+void MainWindow::onDeleteSelected() {
+    QStringList selected = localBrowser_->selectedPaths();
+    if (selected.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("零界 ZeroBorders"),
+                                 QStringLiteral("请先选择要删除的文件。"));
+        return;
+    }
+
+    auto reply = QMessageBox::question(this,
+        QStringLiteral("确认删除"),
+        QStringLiteral("确定要删除 %1 个项目吗？此操作不可恢复。").arg(selected.size()),
+        QMessageBox::Yes | QMessageBox::No);
+    if (reply != QMessageBox::Yes) return;
+
+    for (const QString& path : selected) {
+        QFileInfo fi(path);
+        if (fi.isDir()) {
+            QDir d(path);
+            d.removeRecursively();
+        } else {
+            QFile::remove(path);
+        }
+    }
+}
+
+void MainWindow::onRenameSelected() {
+    QStringList selected = localBrowser_->selectedPaths();
+    if (selected.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("零界 ZeroBorders"),
+                                 QStringLiteral("请先选择要重命名的文件。"));
+        return;
+    }
+    if (selected.size() > 1) {
+        QMessageBox::information(this, QStringLiteral("零界 ZeroBorders"),
+                                 QStringLiteral("一次只能重命名一个文件。"));
+        return;
+    }
+
+    QString oldPath = selected.first();
+    QFileInfo fi(oldPath);
+    QString oldName = fi.fileName();
+
+    bool ok = false;
+    QString newName = QInputDialog::getText(this,
+        QStringLiteral("重命名"),
+        QStringLiteral("新名称："),
+        QLineEdit::Normal, oldName, &ok);
+    if (!ok || newName.isEmpty() || newName == oldName) return;
+
+    QString newPath = fi.path();
+    if (!newPath.endsWith(QLatin1Char('\\')) && !newPath.endsWith(QLatin1Char('/')))
+        newPath += QLatin1Char('\\');
+    newPath += newName;
+
+    QFile f(oldPath);
+    if (!f.rename(newPath)) {
+        QMessageBox::warning(this, QStringLiteral("零界 ZeroBorders"),
+                             QStringLiteral("重命名失败。"));
+    }
+}
+
+void MainWindow::onCopyPath() {
+    QStringList selected = localBrowser_->selectedPaths();
+    if (selected.isEmpty()) {
+        // Copy current directory path if nothing selected
+        QString p = localBrowser_->path();
+        if (!p.isEmpty()) QApplication::clipboard()->setText(p);
+        return;
+    }
+    QApplication::clipboard()->setText(selected.join(QLatin1Char('\n')));
+}
+
+// ---------------------------------------------------------------------------
 // Status / connection
 // ---------------------------------------------------------------------------
 
@@ -610,26 +792,22 @@ void MainWindow::onStatusChanged(const QString& status) {
 void MainWindow::onConnectionChanged(bool connected, const QString& peerName,
                                      quint32 peerW, quint32 peerH) {
     if (connected) {
-        statusLabel_->setStyleSheet("color: #2a7; font-weight: bold;");
+        statusLabel_->setStyleSheet("color: #2a7; font-weight: bold; padding: 0 8px;");
         if (peerW && peerH) {
             peerLabel_->setText(QString("对端：%1x%2").arg(peerW).arg(peerH));
             layoutWidget_->setPeerResolution(peerW, peerH);
         }
         layoutWidget_->setConnected(true);
         layoutWidget_->setPeerName(peerName);
-        refreshRemoteBtn_->setEnabled(true);
         remoteBrowser_->setReadOnly(false);
-        // Remote dir list is requested by App on connection; clear stale
-        // content so the user sees immediate feedback.
         remoteBrowser_->clearRemoteEntries();
         if (trayIcon_) {
             trayIcon_->setIcon(makeTrayIcon(true));
             trayIcon_->setToolTip(QStringLiteral("零界 ZeroBorders（已连接）"));
         }
     } else {
-        statusLabel_->setStyleSheet("color: #666;");
+        statusLabel_->setStyleSheet("color: #666; padding: 0 8px;");
         peerLabel_->setText("");
-        refreshRemoteBtn_->setEnabled(false);
         layoutWidget_->setConnected(false);
         layoutWidget_->setPeerName(QString());
         remoteBrowser_->setReadOnly(true);
@@ -652,18 +830,20 @@ void MainWindow::onLogMessage(const QString& level, const QString& line) {
 }
 
 void MainWindow::appendLog(const QString& line, const QString& tag) {
-    // Choose color by level.
     QString color = "#333";
     if (tag == "WRN") color = "#b8860b";
     else if (tag == "ERR") color = "#c33";
-    else if (tag == "INF") color = "#236";
 
     QString trimmed = line;
-    trimmed.chop(1); // trailing newline from logger
+    trimmed.chop(1);
 
     logView_->appendHtml(QString("<span style='color:%1'>%2</span>")
                              .arg(color, trimmed.toHtmlEscaped()));
 }
+
+// ---------------------------------------------------------------------------
+// Close behavior: X button minimizes to tray
+// ---------------------------------------------------------------------------
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (quitting_) {
@@ -672,18 +852,17 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         return;
     }
 
-    // If minimize-to-tray is enabled and a session is active, hide instead
-    // of quitting so the KVM session keeps running in the background.
-    if (minimizeToTrayCheck_->isChecked() && app_.isRunning() &&
-        QSystemTrayIcon::isSystemTrayAvailable()) {
+    // Always minimize to tray instead of quitting.
+    if (QSystemTrayIcon::isSystemTrayAvailable()) {
         event->ignore();
         hide();
         trayIcon_->showMessage(QStringLiteral("零界 ZeroBorders"),
-            QStringLiteral("程序仍在后台运行，右键托盘图标可退出。"),
+            QStringLiteral("程序已最小化到托盘，右键托盘图标可选择退出。"),
             QSystemTrayIcon::Information, 3000);
         return;
     }
 
+    // No tray available: ask before quitting if session active.
     if (app_.isRunning()) {
         auto reply = QMessageBox::question(
             this, QStringLiteral("零界 ZeroBorders"),
@@ -700,11 +879,11 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings
+// Settings callbacks
 // ---------------------------------------------------------------------------
 
 void MainWindow::onLocalPathChanged(const QString& path) {
-    config_.receiveDir = path.toStdString();
+    config_.receiveDir = QDir::toNativeSeparators(path).toStdString();
     saveConfig();
     if (app_.isRunning() && app_.isConnected()) {
         app_.notifyPathSync();
@@ -714,33 +893,23 @@ void MainWindow::onLocalPathChanged(const QString& path) {
 void MainWindow::onToggleAutoStart(bool enabled) {
     if (!ConfigManager::instance().setAutoStart(enabled)) {
         QMessageBox::warning(this, QStringLiteral("零界 ZeroBorders"),
-            QStringLiteral("无法") + (enabled ? QStringLiteral("启用") : QStringLiteral("禁用")) +
-            QStringLiteral("开机自启，请尝试以管理员身份运行。"));
-        // Revert checkbox state.
-        autoStartCheck_->blockSignals(true);
-        autoStartCheck_->setChecked(ConfigManager::instance().isAutoStartEnabled());
-        autoStartCheck_->blockSignals(false);
+            QStringLiteral("无法修改开机自启，请尝试以管理员身份运行。"));
     }
 }
 
 void MainWindow::onLayoutChanged(ScreenLayout layout) {
     config_.layout = layoutToString(layout);
     saveConfig();
-    // User is actively changing layout — expand the section so they can see it.
     setLayoutCollapsed(false);
-
-    // 任意一端都可以调整相对位置，App::setLayout 会把变更同步给对端。
     if (app_.isRunning() && app_.isConnected()) {
         app_.setLayout(layout);
     }
 }
 
 void MainWindow::onRemoteLayoutChanged(ScreenLayout layout) {
-    // 对端推送过来的布局：更新本地画布与配置，但不再回发（App 内部已防回环）。
     layoutWidget_->setLayout(layout);
     config_.layout = layoutToString(layout);
     saveConfig();
-    // Peer changed layout — expand to show the new position.
     setLayoutCollapsed(false);
 }
 
@@ -750,8 +919,6 @@ void MainWindow::onRemoteReceiveDirChanged(const QString& dir) {
     } else {
         remoteBrowser_->setPath(dir);
     }
-    // Request a listing of the peer's receive directory to populate the
-    // remote browser.
     if (app_.isRunning() && app_.isConnected()) {
         app_.requestRemoteDirList(dir.toStdString());
     }
@@ -762,10 +929,8 @@ void MainWindow::onRemoteReceiveDirChanged(const QString& dir) {
 // ---------------------------------------------------------------------------
 
 static QIcon makeTrayIcon(bool connected) {
-    // Use the embedded application icon, then overlay a small status dot.
     QPixmap pm(":/icons/app.png");
     if (pm.isNull()) {
-        // Fallback: simple procedural icon if the resource is missing.
         pm = QPixmap(32, 32);
         pm.fill(Qt::transparent);
         QPainter p(&pm);
@@ -787,12 +952,10 @@ static QIcon makeTrayIcon(bool connected) {
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
     p.setPen(Qt::NoPen);
-    // Status badge in the bottom-right corner.
-    QColor badge = connected ? QColor(0x22, 0xc5, 0x5e)  // green
-                             : QColor(0x9c, 0x9c, 0x9c); // gray
+    QColor badge = connected ? QColor(0x22, 0xc5, 0x5e)
+                             : QColor(0x9c, 0x9c, 0x9c);
     p.setBrush(badge);
     p.drawEllipse(20, 20, 10, 10);
-    // Thin dark ring around the badge for contrast.
     p.setBrush(Qt::NoBrush);
     p.setPen(QPen(QColor(0x1e, 0x29, 0x3b), 1.5));
     p.drawEllipse(20, 20, 10, 10);
@@ -850,33 +1013,13 @@ void MainWindow::toggleVisible() {
 }
 
 // ---------------------------------------------------------------------------
-// Incoming file offer (confirmation dialog)
+// Incoming file offer (auto-accepted, no dialog)
 // ---------------------------------------------------------------------------
 
 void MainWindow::onIncomingOffer(quint64 id, const QStringList& files, quint64 total) {
-    double mb = total / (1024.0 * 1024.0);
-    QString dirText = localBrowser_->path().isEmpty()
-        ? QStringLiteral("%TEMP%\\ZeroBorders")
-        : localBrowser_->path();
-    QString text = QStringLiteral("收到文件传输请求：\n\n%1 个文件，共 %2 MB\n\n"
-                                  "保存到：%3\n\n是否接收？")
-        .arg(files.size())
-        .arg(mb, 0, 'f', 2)
-        .arg(dirText);
-
-    auto reply = QMessageBox::question(this, QStringLiteral("收到文件传输请求"), text,
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-    if (reply == QMessageBox::Yes) {
-        std::string dir = config_.receiveDir;
-        app_.acceptTransfer(static_cast<uint64_t>(id), dir);
-        // Show progress on local side for the incoming transfer.
-        currentTransferId_ = static_cast<quint64>(id);
-        activeSide_ = 1;
-        transferIncoming_ = true;
-        localBrowser_->showProgress(QStringLiteral("正在接收 %1 个项目...").arg(files.size()));
-    } else {
-        app_.rejectTransfer(static_cast<uint64_t>(id));
-    }
+    Q_UNUSED(id)
+    Q_UNUSED(files)
+    Q_UNUSED(total)
 }
 
 } // namespace zb

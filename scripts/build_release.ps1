@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     ZeroBorders 发行版打包脚本
 .DESCRIPTION

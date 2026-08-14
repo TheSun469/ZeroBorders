@@ -46,6 +46,13 @@ void ScreenRouter::setLayout(ScreenLayout layout) {
 bool ScreenRouter::processEvent(const InputEvent& ev) {
     std::lock_guard<std::mutex> lk(mutex_);
 
+    // 尚未配置分辨率时（连接建立前或配置异常），拒绝处理所有事件，
+    // 避免 isAtCrossEdge 误判（serverW_=0 时 x>=-1 恒真）和
+    // calcEntryPoint 除零崩溃。
+    if (serverW_ == 0 || serverH_ == 0 || clientW_ == 0 || clientH_ == 0) {
+        return false;
+    }
+
     if (remoteControl_.load()) {
         // Control is on the client side.
         InputEvent mapped = ev;
@@ -198,6 +205,7 @@ void ScreenRouter::forceLocalControl() {
 }
 
 bool ScreenRouter::isAtCrossEdge(int32_t x, int32_t y) const {
+    if (serverW_ == 0 || serverH_ == 0) return false;
     Edge e = serverCrossEdge(layout_);
     switch (e) {
         case Edge::Right:  return x >= static_cast<int32_t>(serverW_) - 1;
@@ -210,21 +218,24 @@ bool ScreenRouter::isAtCrossEdge(int32_t x, int32_t y) const {
 
 CursorEnterMsg ScreenRouter::calcEntryPoint(int32_t mouseX, int32_t mouseY) const {
     CursorEnterMsg msg{};
+    // 除零兜底：processEvent 已有防护，这里再防御一层确保万无一失。
+    uint32_t sW = serverW_ ? serverW_ : 1;
+    uint32_t sH = serverH_ ? serverH_ : 1;
     switch (layout_) {
         case ScreenLayout::RightOf:
             msg.x = 0;
-            msg.y = static_cast<int32_t>(static_cast<int64_t>(mouseY) * clientH_ / serverH_);
+            msg.y = static_cast<int32_t>(static_cast<int64_t>(mouseY) * clientH_ / sH);
             break;
         case ScreenLayout::LeftOf:
             msg.x = static_cast<int32_t>(clientW_) - 1;
-            msg.y = static_cast<int32_t>(static_cast<int64_t>(mouseY) * clientH_ / serverH_);
+            msg.y = static_cast<int32_t>(static_cast<int64_t>(mouseY) * clientH_ / sH);
             break;
         case ScreenLayout::Above:
-            msg.x = static_cast<int32_t>(static_cast<int64_t>(mouseX) * clientW_ / serverW_);
+            msg.x = static_cast<int32_t>(static_cast<int64_t>(mouseX) * clientW_ / sW);
             msg.y = static_cast<int32_t>(clientH_) - 1;
             break;
         case ScreenLayout::Below:
-            msg.x = static_cast<int32_t>(static_cast<int64_t>(mouseX) * clientW_ / serverW_);
+            msg.x = static_cast<int32_t>(static_cast<int64_t>(mouseX) * clientW_ / sW);
             msg.y = 0;
             break;
     }

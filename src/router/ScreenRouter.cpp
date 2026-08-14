@@ -18,8 +18,7 @@ void ScreenRouter::configure(uint32_t serverW, uint32_t serverH,
     clientH_ = clientH;
     layout_ = layout;
     remoteControl_ = false;
-    pendingCross_ = false;
-    pendingReturn_ = false;
+    keyboardControl_ = false;
     clientCursorX_ = -1;
     clientCursorY_ = -1;
     clientCursorAccumX_ = 0.0;
@@ -39,8 +38,7 @@ void ScreenRouter::setLayout(ScreenLayout layout) {
         if (suppressCb_) suppressCb_(false);
         if (cursorVisibleCb_) cursorVisibleCb_(true);
     }
-    pendingCross_ = false;
-    pendingReturn_ = false;
+    keyboardControl_ = false;
     clientCursorX_ = -1;
     clientCursorY_ = -1;
     clientCursorAccumX_ = 0.0;
@@ -59,7 +57,7 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
     }
 
     if (remoteControl_.load()) {
-        // Control is on the client side.
+        // 鼠标控制权在对端：鼠标移动和点击始终转发给对端。
         InputEvent mapped = ev;
 
         if (ev.type == EventType::MouseMove) {
@@ -70,10 +68,6 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
             int32_t dx = ev.mouseMove.x - centerX;
             int32_t dy = ev.mouseMove.y - centerY;
 
-            // Use floating-point accumulation so sub-pixel movements are not
-            // lost to integer truncation. Without this, slow mouse movement
-            // feels "stuck" because small deltas round to zero on the client
-            // when its resolution differs from the server's.
             if (serverW_ > 0) {
                 clientCursorAccumX_ += static_cast<double>(dx) *
                     static_cast<double>(clientW_) / static_cast<double>(serverW_);
@@ -96,70 +90,61 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
             clientCursorY_ = std::max(0, std::min(clientCursorY_,
                 static_cast<int32_t>(clientH_) - 1));
 
-            // Check if the cursor crossed the return edge on the client.
+            // 鼠标碰到返回边缘：立即切换鼠标控制权回本地（与原行为一致），
+            // 键盘控制权也一并释放。
             if (isAtReturnEdge(clientCursorX_, clientCursorY_)) {
-                // 鼠标到达返回边缘，进入待返回状态，等待左键点击才切换。
-                pendingReturn_ = true;
-                // 仍然 warp 回中心，继续转发移动事件。
-                if (warpCb_) warpCb_(centerX, centerY);
-                mapped.mouseMove.x = clientCursorX_;
-                mapped.mouseMove.y = clientCursorY_;
-                if (sendCb_) sendCb_(mapped);
+                Edge retEdge = clientReturnEdge(layout_);
+                returnToLocalControl(retEdge);
                 return true;
             }
 
-            // 离开返回边缘，取消待返回状态。
-            pendingReturn_ = false;
-
-            // Warp cursor back to center for next delta calculation
             if (warpCb_) warpCb_(centerX, centerY);
 
             mapped.mouseMove.x = clientCursorX_;
             mapped.mouseMove.y = clientCursorY_;
+            if (sendCb_) sendCb_(mapped);
+            return true;
+        }
 
-        } else if (ev.type == EventType::MouseButton) {
-            // 在待返回状态下，左键按下触发返回本地控制。
-            if (pendingReturn_ &&
-                ev.mouseButton.button == MouseButton::Left &&
-                ev.mouseButton.pressed) {
-                Edge retEdge = clientReturnEdge(layout_);
-                pendingReturn_ = false;
-                returnToLocalControl(retEdge);
-                return true;  // 吞掉这个点击事件，不转发给被控端
+        if (ev.type == EventType::MouseButton) {
+            // 左键按下时切换键盘控制权到对端（鼠标已在对端）。
+            if (ev.mouseButton.button == MouseButton::Left && ev.mouseButton.pressed) {
+                keyboardControl_ = true;
             }
             mapped.mouseButton.x = clientCursorX_;
             mapped.mouseButton.y = clientCursorY_;
+            if (sendCb_) sendCb_(mapped);
+            return true;
         }
 
+        // 键盘事件：只有 keyboardControl_ 为 true 时才转发给对端，
+        // 否则让按键在本机生效（不拦截）。
+        if (ev.type == EventType::KeyDown || ev.type == EventType::KeyUp) {
+            if (keyboardControl_) {
+                if (sendCb_) sendCb_(mapped);
+                return true;   // 拦截，不传给本机
+            }
+            return false;       // 不拦截，本机正常处理
+        }
+
+        // 滚轮跟随鼠标，始终转发给对端。
         if (sendCb_) sendCb_(mapped);
         return true;
     }
 
-    // 本地控制模式。
+    // 本地鼠标控制模式：鼠标移动检测边缘穿越（原行为）。
     if (ev.type == EventType::MouseMove) {
         lastMouseX_ = ev.mouseMove.x;
         lastMouseY_ = ev.mouseMove.y;
 
         if (isAtCrossEdge(ev.mouseMove.x, ev.mouseMove.y)) {
-            // 鼠标到达交叉边缘，进入待切换状态，等待左键点击。
-            pendingCross_ = true;
-        } else {
-            // 离开边缘，取消待切换状态。
-            pendingCross_ = false;
+            enterRemoteControl(ev.mouseMove.x, ev.mouseMove.y);
+            return true;
         }
-        // 不拦截，让鼠标在本地正常移动。
         return false;
     }
 
-    // 在待切换状态下，左键按下触发进入远程控制。
-    if (pendingCross_ && ev.type == EventType::MouseButton &&
-        ev.mouseButton.button == MouseButton::Left &&
-        ev.mouseButton.pressed) {
-        pendingCross_ = false;
-        enterRemoteControl(ev.mouseButton.x, ev.mouseButton.y);
-        return true;  // 吞掉这个点击事件
-    }
-
+    // 本地模式下，键盘和鼠标点击不拦截（本机正常处理）。
     return false;
 }
 
@@ -238,8 +223,7 @@ void ScreenRouter::handleCursorLeave(Edge clientEdge) {
 
 void ScreenRouter::forceLocalControl() {
     std::lock_guard<std::mutex> lk(mutex_);
-    pendingCross_ = false;
-    pendingReturn_ = false;
+    keyboardControl_ = false;
     if (remoteControl_.load()) {
         remoteControl_ = false;
         if (releaseKeysCb_) releaseKeysCb_();

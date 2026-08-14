@@ -241,11 +241,10 @@ LRESULT CALLBACK WinInputCapturer::keyboardProc(int code, WPARAM wParam, LPARAM 
             }
         }
 
-        // Suppress if either the global suppress flag is on or the callback
-        // explicitly requested it. The callback return value is critical for
-        // return-edge events where suppression is released inside the callback
-        // but the current event must still be swallowed.
-        if ((instance_->suppress_.load() || suppressEvent) && !injected) {
+        // 键盘事件：只根据 callback 返回值决定是否拦截，不受全局 suppress_ 影响。
+        // suppress_ 仅用于鼠标（隐藏光标时压制本地鼠标移动），键盘控制权由
+        // ScreenRouter 的 keyboardControl_ 标志精确控制。
+        if (suppressEvent && !injected) {
             return 1;
         }
     }

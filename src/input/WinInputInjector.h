@@ -15,6 +15,7 @@ public:
     ~WinInputInjector() override = default;
 
     bool inject(const InputEvent& ev) override;
+    void releaseAllKeys() override;
 
     // Move cursor to absolute position (public for CursorEnter handling).
     bool injectMouseMove(int32_t x, int32_t y);

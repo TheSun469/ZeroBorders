@@ -26,6 +26,40 @@ bool WinInputInjector::inject(const InputEvent& ev) {
     }
 }
 
+void WinInputInjector::releaseAllKeys() {
+    // 释放所有修饰键，防止跨屏切换时修饰键状态在对端残留。
+    // 用 GetAsyncKeyState 检查实际状态，只释放真正按下的键。
+    struct { uint16_t vk; const char* name; } mods[] = {
+        {VK_LCONTROL,  "LControl"},
+        {VK_RCONTROL,  "RControl"},
+        {VK_LSHIFT,    "LShift"},
+        {VK_RSHIFT,    "RShift"},
+        {VK_LMENU,     "LAlt"},
+        {VK_RMENU,     "RAlt"},
+        {VK_LWIN,      "LWin"},
+        {VK_RWIN,      "RWin"},
+    };
+
+    bool any = false;
+    INPUT inputs[8]{};
+    int count = 0;
+    for (auto& m : mods) {
+        if (GetAsyncKeyState(m.vk) & 0x8000) {
+            ZB_LOG_INFO("Releasing stuck key: {}", m.name);
+            inputs[count].type = INPUT_KEYBOARD;
+            inputs[count].ki.wVk = m.vk;
+            inputs[count].ki.dwFlags = KEYEVENTF_KEYUP;
+            ++count;
+            any = true;
+            // 重置 Win 键状态（Win+L 检测用）
+            if (m.vk == VK_LWIN || m.vk == VK_RWIN) winPressed_ = false;
+        }
+    }
+    if (any && count > 0) {
+        SendInput(count, inputs, sizeof(INPUT));
+    }
+}
+
 bool WinInputInjector::injectMouseMove(int32_t x, int32_t y) {
     lastX_ = x;
     lastY_ = y;

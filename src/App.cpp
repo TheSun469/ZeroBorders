@@ -951,6 +951,24 @@ void App::wireServerCallbacks() {
     router_->onReleaseButtons([this] {
         if (capturer_) capturer_->releaseAllButtons();
     });
+    // 进入/退出远程控制时向被控端发送所有修饰键的 KeyUp 事件，
+    // 防止 Ctrl/Shift/Alt/Win 在对端残留导致组合键卡住
+    // （如 Ctrl 卡住导致滚轮缩放网页、数字键变成快捷键）。
+    router_->onReleaseKeys([this] {
+        if (!inputSender_) return;
+        InputEvent ev{};
+        ev.type = EventType::KeyUp;
+        // 释放左右 Ctrl/Shift/Alt/Win
+        uint16_t mods[] = {VK_LCONTROL, VK_RCONTROL, VK_LSHIFT, VK_RSHIFT,
+                           VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN};
+        for (uint16_t vk : mods) {
+            ev.key.vkCode = vk;
+            ev.key.scanCode = 0;
+            ev.key.extended = (vk == VK_RMENU || vk == VK_RCONTROL ||
+                               vk == VK_RSHIFT || vk == VK_RWIN);
+            inputSender_->submit(ev);
+        }
+    });
     router_->onCursorVisible([this](bool visible) {
         if (capturer_) capturer_->setCursorVisible(visible);
     });
@@ -1051,6 +1069,9 @@ void App::wireClientCallbacks() {
             } else if (t == MsgType::CursorEnter) {
                 CursorEnterMsg msg{};
                 if (parseCursorEnter(p, msg)) {
+                    // 进入被控模式前释放所有修饰键，清理之前可能残留的
+                    // Ctrl/Shift/Alt/Win 状态，防止跨屏切换时组合键卡住。
+                    injector_->releaseAllKeys();
                     injector_->injectMouseMove(msg.x, msg.y);
                     hasControl_ = true;
                 }

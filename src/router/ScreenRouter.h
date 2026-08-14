@@ -25,6 +25,7 @@ public:
     using SendEventCallback = std::function<void(const InputEvent&)>;
     using ReleaseButtonsCallback = std::function<void()>;
     using CursorVisibleCallback = std::function<void(bool visible)>;
+    using ReleaseKeysCallback = std::function<void()>;
 
     ScreenRouter();
     ~ScreenRouter();
@@ -43,6 +44,7 @@ public:
     void onSendEvent(SendEventCallback cb) { sendCb_ = std::move(cb); }
     void onReleaseButtons(ReleaseButtonsCallback cb) { releaseButtonsCb_ = std::move(cb); }
     void onCursorVisible(CursorVisibleCallback cb) { cursorVisibleCb_ = std::move(cb); }
+    void onReleaseKeys(ReleaseKeysCallback cb) { releaseKeysCb_ = std::move(cb); }
 
     bool processEvent(const InputEvent& ev);
 
@@ -79,6 +81,7 @@ private:
     SendEventCallback sendCb_;
     ReleaseButtonsCallback releaseButtonsCb_;
     CursorVisibleCallback cursorVisibleCb_;
+    ReleaseKeysCallback releaseKeysCb_;
 
     int32_t lastMouseX_ = -1;
     int32_t lastMouseY_ = -1;

@@ -33,6 +33,7 @@ void ScreenRouter::setLayout(ScreenLayout layout) {
     // Return control to local so the new edge is used immediately.
     if (remoteControl_.load()) {
         remoteControl_ = false;
+        if (releaseKeysCb_) releaseKeysCb_();
         if (suppressCb_) suppressCb_(false);
         if (cursorVisibleCb_) cursorVisibleCb_(true);
     }
@@ -149,6 +150,11 @@ void ScreenRouter::enterRemoteControl(int32_t mouseX, int32_t mouseY) {
     // selection/drag when the cursor returns.
     if (releaseButtonsCb_) releaseButtonsCb_();
 
+    // 释放本地可能卡住的修饰键（Ctrl/Shift/Alt/Win），防止跨屏后
+    // 本地状态残留导致对端误判组合键。同时被控端收到 CursorEnter 后
+    // 也会调用 releaseAllKeys 清理自身状态。
+    if (releaseKeysCb_) releaseKeysCb_();
+
     // Hide the local cursor so the user only sees the remote cursor.
     if (cursorVisibleCb_) cursorVisibleCb_(false);
 
@@ -167,6 +173,9 @@ void ScreenRouter::returnToLocalControl(Edge clientEdge) {
     calcReturnPosition(clientEdge, x, y);
 
     ZB_LOG_INFO("Cursor returning -> server at ({}, {})", x, y);
+
+    // 通知被控端释放所有修饰键，防止 Ctrl/Shift/Alt/Win 在对端残留。
+    if (releaseKeysCb_) releaseKeysCb_();
 
     // Update last known position so immediate re-entry calculates the
     // correct entry Y coordinate.
@@ -198,6 +207,7 @@ void ScreenRouter::forceLocalControl() {
     std::lock_guard<std::mutex> lk(mutex_);
     if (remoteControl_.load()) {
         remoteControl_ = false;
+        if (releaseKeysCb_) releaseKeysCb_();
         if (suppressCb_) suppressCb_(false);
         if (cursorVisibleCb_) cursorVisibleCb_(true);
         ZB_LOG_INFO("Forced local control (emergency release)");

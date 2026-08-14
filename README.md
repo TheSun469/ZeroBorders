@@ -11,8 +11,8 @@ ZeroBorders 是一款运行于 Windows 平台的局域网软件 KVM（Keyboard-V
 - 跨屏拖拽时自动释放已按下的鼠标按键，避免按键"卡住"。
 - 子像素级坐标累加，避免微小移动因整数截断而丢失。
 - 鼠标滚轮通过 `PostMessage(WM_MOUSEWHEEL/WM_MOUSEHWHEEL)` 直接投送到光标下窗口，解决远程滚轮失效问题。
-- **鼠标/键盘控制权分离**：鼠标和点击始终跟随光标所在屏幕（鼠标跨屏即可操作对端），但键盘控制权独立管理——只有在**对端屏幕左键点击**后才切换到对端，避免鼠标滑过边缘时键盘意外跟随。
-- **跨屏切换时释放修饰键**：进入或退出远程控制时，向对端发送所有修饰键（Ctrl/Shift/Alt/Win）的 KeyUp 事件，防止状态残留导致快捷键异常（如 Ctrl 卡住引发滚轮缩放网页、数字键变成快捷键）。
+- **鼠标/键盘控制权完全分离**：鼠标和键盘独立管理，互不影响。鼠标跨屏即可操作对端，但键盘控制权只有**左键点击**才切换——对端左键点击切键盘到对端，本地左键点击切键盘回本地。鼠标跨屏不会触发键盘切换或修饰键释放，避免鼠标滑过边缘时键盘意外跟随。
+- **左键点击切换键盘时释放修饰键**：对端左键点击切换键盘到对端时（通过 `CursorEnter`），或本地左键点击切回键盘到本地时，向对端发送所有修饰键（Ctrl/Shift/Alt/Win）的 KeyUp 事件，防止状态残留导致快捷键异常（如 Ctrl 卡住引发滚轮缩放网页、数字键变成快捷键）。鼠标跨屏不释放修饰键，因为键盘控制权未变。
 - **被控端光标自动隐藏**：鼠标返回控制端后，被控端通过 `CursorLeave` 通知隐藏本地光标，避免被控端屏幕残留静止光标；再次进入时通过 `CursorEnter` 恢复显示。
 
 ### 剪贴板共享
@@ -370,22 +370,38 @@ ZeroBorders/
 
 ### 控制权切换流程
 
+**鼠标控制权**（跟随光标位置）：
+
 1. 控制端（Server）通过 Raw Input 捕获本机鼠标移动。
 2. `ScreenRouter` 检测到光标到达布局定义的交叉边缘（例如布局为 `RightOf` 时，光标碰到屏幕右边缘）。
 3. Server 发送 `CursorEnter` 消息给被控端（Client），包含入口坐标。
 4. Client 接收后通过 `WinInputInjector` 把光标 warp 到对应位置，显示本地光标，并开始注入后续鼠标事件。
-5. **键盘控制权延迟切换**：鼠标进入对端后 `remoteControl_=true`（鼠标和点击立即跟随），但 `keyboardControl_` 仍为 `false`，键盘事件暂不转发。只有当用户**左键点击**对端屏幕后才置 `keyboardControl_=true`，键盘才开始转发到对端。
-6. Client 端检测到光标碰到返回边缘时，发送 `CursorLeave`，Server 恢复本地控制并把光标 warp 回本机边缘。
-7. Server 收到返回边缘信号时，向 Client 发送 `CursorLeave`，Client 据此隐藏本地光标、置 `hasControl_=false` 停止接受输入注入，并释放所有修饰键。
-8. 每次进入/退出远程控制都会重置 `keyboardControl_=false`，确保下次进入对端必须再次左键点击才能切换键盘。
+5. Client 端检测到光标碰到返回边缘时，发送 `CursorLeave`，Server 恢复本地控制并把光标 warp 回本机边缘。
+6. Server 收到返回边缘信号时，向 Client 发送 `CursorLeave`，Client 据此隐藏本地光标、置 `hasControl_=false` 停止接受鼠标注入（不释放修饰键，因为键盘可能仍在对端）。
+
+**键盘控制权**（独立于鼠标，左键点击切换）：
+
+键盘事件在 `processEvent` 开头独立判断，不受 `remoteControl_` 影响：
+- `keyboardControl_=true` → 转发到对端并拦截本机
+- `keyboardControl_=false` → 本机正常处理
+
+切换时机：
+- **对端左键点击** → `keyboardControl_=true`，键盘切到对端
+- **本地左键点击** → `keyboardControl_=false`，键盘切回本地，同时向对端发送修饰键 KeyUp 释放
+
+鼠标跨屏（进入或返回）**不重置** `keyboardControl_`，也不释放修饰键。这样鼠标可以在两端自由移动，而键盘保持在用户上次左键点击所在的一侧。
 
 **控制权标志分离设计：**
 
 | 标志 | 作用 | 切换时机 |
 |------|------|----------|
 | `remoteControl_` | 鼠标和点击是否转发到对端 | 鼠标跨屏立即切换 |
-| `keyboardControl_` | 键盘事件是否转发到对端 | 左键点击对端屏幕后才切换 |
-| `hasControl_`（被控端） | 是否接受控制端的输入注入 | 收到 `CursorEnter` 置 true，收到 `CursorLeave` 置 false |
+| `keyboardControl_` | 键盘事件是否转发到对端 | 左键点击切换，鼠标跨屏不影响 |
+| `hasControl_`（被控端） | 是否接受控制端的鼠标注入 | 收到 `CursorEnter` 置 true，收到 `CursorLeave` 置 false |
+
+**被控端键盘注入：**
+
+被控端收到 `InputEvent` 时，键盘事件（KeyDown/KeyUp）总是注入（控制端只在 `keyboardControl_=true` 时才转发键盘，收到即代表键盘控制权在对端）；鼠标事件检查 `hasControl_`，只有 `CursorEnter` 后才注入。
 
 ### 剪贴板同步流程
 
@@ -423,7 +439,7 @@ ZeroBorders/
 - **远程目录懒加载**：`RemoteDirTreeModel` 只在用户展开节点时才请求对端目录，避免一次性扫描整个文件系统；树中只显示文件夹，与本地 PathComboBox 行为一致。
 - **线程安全**：UDP 发现线程不在自身执行流中调用 `stop()/join()`，而是设置 `running_=false` 自然退出；线程清理通过 `QMetaObject::invokeMethod` 在主线程执行 `join()`。
 - **Word 2019 主题实现**：通过全局 QSS 样式表实现，下拉箭头在运行时用 `QPainter` 绘制为 PNG data URI 注入（项目未链接 Qt SVG 模块）。
-- **鼠标/键盘控制权分离**：`ScreenRouter` 用 `remoteControl_` 和 `keyboardControl_` 两个标志分别管理鼠标和键盘转发。鼠标跨屏后 `remoteControl_` 立即为 true（鼠标移动和点击跟随光标），但 `keyboardControl_` 只在左键点击后才置 true，避免鼠标滑过边缘时键盘意外跟随。每次进入或退出远程控制都会重置 `keyboardControl_`，防止上次点击的残留状态导致键盘直接转发。
+- **鼠标/键盘控制权完全分离**：`ScreenRouter` 用 `remoteControl_` 和 `keyboardControl_` 两个标志分别管理鼠标和键盘转发，两者完全独立。键盘事件在 `processEvent` 开头独立判断，不受 `remoteControl_` 影响。鼠标跨屏只切换 `remoteControl_`，不重置 `keyboardControl_`，也不释放修饰键。键盘控制权只有左键点击才切换：对端左键点击置 `keyboardControl_=true`，本地左键点击置 `false` 并释放对端修饰键。这样鼠标可以在两端自由移动，键盘保持在用户上次左键点击所在的一侧。
 - **被控端光标可见性管理**：`WinInputInjector` 实现 `setCursorVisible`，通过 `SetSystemCursor` 将所有系统光标（箭头、I 型、链接手型、调整大小等）替换为 1x1 透明光标。被控端收到 `CursorEnter` 显示光标、收到 `CursorLeave` 隐藏光标，确保用户在控制端操作时被控端屏幕不会残留静止光标；断开连接和析构时自动恢复系统光标，防止永久隐藏。
 
 ## 配置文件

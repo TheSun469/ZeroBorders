@@ -11,6 +11,9 @@ ZeroBorders 是一款运行于 Windows 平台的局域网软件 KVM（Keyboard-V
 - 跨屏拖拽时自动释放已按下的鼠标按键，避免按键"卡住"。
 - 子像素级坐标累加，避免微小移动因整数截断而丢失。
 - 鼠标滚轮通过 `PostMessage(WM_MOUSEWHEEL/WM_MOUSEHWHEEL)` 直接投送到光标下窗口，解决远程滚轮失效问题。
+- **鼠标/键盘控制权分离**：鼠标和点击始终跟随光标所在屏幕（鼠标跨屏即可操作对端），但键盘控制权独立管理——只有在**对端屏幕左键点击**后才切换到对端，避免鼠标滑过边缘时键盘意外跟随。
+- **跨屏切换时释放修饰键**：进入或退出远程控制时，向对端发送所有修饰键（Ctrl/Shift/Alt/Win）的 KeyUp 事件，防止状态残留导致快捷键异常（如 Ctrl 卡住引发滚轮缩放网页、数字键变成快捷键）。
+- **被控端光标自动隐藏**：鼠标返回控制端后，被控端通过 `CursorLeave` 通知隐藏本地光标，避免被控端屏幕残留静止光标；再次进入时通过 `CursorEnter` 恢复显示。
 
 ### 剪贴板共享
 - **文字**：`CF_UNICODETEXT` 双向同步。
@@ -276,12 +279,12 @@ ZeroBorders/
     │
     ├── input/                  # 输入捕获与注入
     │   ├── IInputCapturer.h    # 捕获接口（Raw Input）
-    │   ├── IInputInjector.h    # 注入接口（SendInput）
+    │   ├── IInputInjector.h    # 注入接口（SendInput + 光标可见性）
     │   ├── WinInputCapturer.*  # Windows Raw Input 实现，支持抑制/光标warp/按键释放
-    │   └── WinInputInjector.*  # Windows SendInput 实现，坐标映射
+    │   └── WinInputInjector.*  # Windows SendInput 实现，坐标映射、修饰键释放、光标隐藏/恢复
     │
     ├── router/                 # 屏幕路由（控制端独有逻辑）
-    │   ├── ScreenRouter.h/.cpp # 边缘检测、控制权切换、坐标映射
+    │   ├── ScreenRouter.h/.cpp # 边缘检测、控制权切换（鼠标/键盘分离）、坐标映射、CursorLeave 通知
     │   └── InputEventSender.h  # 将 InputEvent 通过网络回调发送
     │
     ├── clipboard/              # 剪贴板
@@ -370,8 +373,19 @@ ZeroBorders/
 1. 控制端（Server）通过 Raw Input 捕获本机鼠标移动。
 2. `ScreenRouter` 检测到光标到达布局定义的交叉边缘（例如布局为 `RightOf` 时，光标碰到屏幕右边缘）。
 3. Server 发送 `CursorEnter` 消息给被控端（Client），包含入口坐标。
-4. Client 接收后通过 `WinInputInjector` 把光标 warp 到对应位置，并开始注入后续输入事件。
-5. Client 端检测到光标碰到返回边缘时，发送 `CursorLeave`，Server 恢复本地控制并把光标 warp 回本机边缘。
+4. Client 接收后通过 `WinInputInjector` 把光标 warp 到对应位置，显示本地光标，并开始注入后续鼠标事件。
+5. **键盘控制权延迟切换**：鼠标进入对端后 `remoteControl_=true`（鼠标和点击立即跟随），但 `keyboardControl_` 仍为 `false`，键盘事件暂不转发。只有当用户**左键点击**对端屏幕后才置 `keyboardControl_=true`，键盘才开始转发到对端。
+6. Client 端检测到光标碰到返回边缘时，发送 `CursorLeave`，Server 恢复本地控制并把光标 warp 回本机边缘。
+7. Server 收到返回边缘信号时，向 Client 发送 `CursorLeave`，Client 据此隐藏本地光标、置 `hasControl_=false` 停止接受输入注入，并释放所有修饰键。
+8. 每次进入/退出远程控制都会重置 `keyboardControl_=false`，确保下次进入对端必须再次左键点击才能切换键盘。
+
+**控制权标志分离设计：**
+
+| 标志 | 作用 | 切换时机 |
+|------|------|----------|
+| `remoteControl_` | 鼠标和点击是否转发到对端 | 鼠标跨屏立即切换 |
+| `keyboardControl_` | 键盘事件是否转发到对端 | 左键点击对端屏幕后才切换 |
+| `hasControl_`（被控端） | 是否接受控制端的输入注入 | 收到 `CursorEnter` 置 true，收到 `CursorLeave` 置 false |
 
 ### 剪贴板同步流程
 
@@ -409,6 +423,8 @@ ZeroBorders/
 - **远程目录懒加载**：`RemoteDirTreeModel` 只在用户展开节点时才请求对端目录，避免一次性扫描整个文件系统；树中只显示文件夹，与本地 PathComboBox 行为一致。
 - **线程安全**：UDP 发现线程不在自身执行流中调用 `stop()/join()`，而是设置 `running_=false` 自然退出；线程清理通过 `QMetaObject::invokeMethod` 在主线程执行 `join()`。
 - **Word 2019 主题实现**：通过全局 QSS 样式表实现，下拉箭头在运行时用 `QPainter` 绘制为 PNG data URI 注入（项目未链接 Qt SVG 模块）。
+- **鼠标/键盘控制权分离**：`ScreenRouter` 用 `remoteControl_` 和 `keyboardControl_` 两个标志分别管理鼠标和键盘转发。鼠标跨屏后 `remoteControl_` 立即为 true（鼠标移动和点击跟随光标），但 `keyboardControl_` 只在左键点击后才置 true，避免鼠标滑过边缘时键盘意外跟随。每次进入或退出远程控制都会重置 `keyboardControl_`，防止上次点击的残留状态导致键盘直接转发。
+- **被控端光标可见性管理**：`WinInputInjector` 实现 `setCursorVisible`，通过 `SetSystemCursor` 将所有系统光标（箭头、I 型、链接手型、调整大小等）替换为 1x1 透明光标。被控端收到 `CursorEnter` 显示光标、收到 `CursorLeave` 隐藏光标，确保用户在控制端操作时被控端屏幕不会残留静止光标；断开连接和析构时自动恢复系统光标，防止永久隐藏。
 
 ## 配置文件
 

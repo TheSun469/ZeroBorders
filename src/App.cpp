@@ -577,6 +577,8 @@ void App::launchClient(const AppConfig& cfg, const std::string& host,
     auto onDisconnect = [this](const std::string& reason) {
         bool wasConnected = connected_.exchange(false);
         hasControl_ = false;
+        // 断开连接时恢复被控端光标，防止光标永久隐藏。
+        if (injector_) injector_->setCursorVisible(true);
         emit connectionChanged(false, "", 0, 0);
         if (wasConnected && running_.load()) {
             setStatus(QStringLiteral("连接断开，正在重新搜索..."));
@@ -941,6 +943,14 @@ void App::wireServerCallbacks() {
     router_->onCursorEnter([this](const CursorEnterMsg& msg) {
         if (server_) server_->sendControl(MsgType::CursorEnter, serializeCursorEnter(msg));
     });
+    router_->onCursorLeave([this](Edge clientEdge) {
+        // 通知被控端光标已离开，被控端据此隐藏本地光标并停止接受输入注入。
+        if (server_) {
+            CursorLeaveMsg msg{};
+            msg.edge = clientEdge;
+            server_->sendControl(MsgType::CursorLeave, serializeCursorLeave(msg));
+        }
+    });
     router_->onSuppress([this](bool suppress) {
         if (capturer_) capturer_->setSuppress(suppress);
     });
@@ -1074,7 +1084,15 @@ void App::wireClientCallbacks() {
                     injector_->releaseAllKeys();
                     injector_->injectMouseMove(msg.x, msg.y);
                     hasControl_ = true;
+                    // 显示本地光标，让用户在被控端屏幕上看到鼠标。
+                    injector_->setCursorVisible(true);
                 }
+            } else if (t == MsgType::CursorLeave) {
+                // 控制端鼠标已返回，被控端停止接受输入注入并隐藏本地光标，
+                // 避免被控端屏幕上残留静止光标干扰用户在控制端的操作。
+                hasControl_ = false;
+                injector_->releaseAllKeys();
+                injector_->setCursorVisible(false);
             } else if (t == MsgType::Ping) {
                 uint64_t ts = 0;
                 if (parsePingPong(p, ts))

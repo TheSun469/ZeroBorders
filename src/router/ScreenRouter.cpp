@@ -34,6 +34,7 @@ void ScreenRouter::setLayout(ScreenLayout layout) {
     // Return control to local so the new edge is used immediately.
     if (remoteControl_.load()) {
         remoteControl_ = false;
+        if (leaveCb_) leaveCb_(clientReturnEdge(layout_));
         if (releaseKeysCb_) releaseKeysCb_();
         if (suppressCb_) suppressCb_(false);
         if (cursorVisibleCb_) cursorVisibleCb_(true);
@@ -198,6 +199,9 @@ void ScreenRouter::returnToLocalControl(Edge clientEdge) {
 
     ZB_LOG_INFO("Cursor returning -> server at ({}, {})", x, y);
 
+    // 通知被控端光标已离开，被控端据此隐藏本地光标并停止接受输入注入。
+    if (leaveCb_) leaveCb_(clientEdge);
+
     // 通知被控端释放所有修饰键，防止 Ctrl/Shift/Alt/Win 在对端残留。
     if (releaseKeysCb_) releaseKeysCb_();
 
@@ -232,6 +236,8 @@ void ScreenRouter::forceLocalControl() {
     keyboardControl_ = false;
     if (remoteControl_.load()) {
         remoteControl_ = false;
+        // 通知被控端光标已离开（锁屏等紧急场景），被控端据此隐藏光标。
+        if (leaveCb_) leaveCb_(clientReturnEdge(layout_));
         if (releaseKeysCb_) releaseKeysCb_();
         if (suppressCb_) suppressCb_(false);
         if (cursorVisibleCb_) cursorVisibleCb_(true);

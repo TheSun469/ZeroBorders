@@ -20,6 +20,7 @@ namespace zb {
 class ScreenRouter {
 public:
     using CursorEnterCallback = std::function<void(const CursorEnterMsg&)>;
+    using CursorLeaveCallback = std::function<void(Edge clientEdge)>;
     using SuppressCallback = std::function<void(bool suppress)>;
     using WarpCursorCallback = std::function<void(int32_t x, int32_t y)>;
     using SendEventCallback = std::function<void(const InputEvent&)>;
@@ -39,6 +40,7 @@ public:
     void setLayout(ScreenLayout layout);
 
     void onCursorEnter(CursorEnterCallback cb) { enterCb_ = std::move(cb); }
+    void onCursorLeave(CursorLeaveCallback cb) { leaveCb_ = std::move(cb); }
     void onSuppress(SuppressCallback cb) { suppressCb_ = std::move(cb); }
     void onWarpCursor(WarpCursorCallback cb) { warpCb_ = std::move(cb); }
     void onSendEvent(SendEventCallback cb) { sendCb_ = std::move(cb); }
@@ -81,6 +83,7 @@ private:
     bool keyboardControl_ = false;
 
     CursorEnterCallback enterCb_;
+    CursorLeaveCallback leaveCb_;
     SuppressCallback suppressCb_;
     WarpCursorCallback warpCb_;
     SendEventCallback sendCb_;

@@ -1,11 +1,43 @@
 #include "WinInputInjector.h"
 #include "../core/Log.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+// OCR_* cursor IDs may not be exposed when WIN32_LEAN_AND_MEAN is defined.
+#ifndef OCR_NORMAL
+#define OCR_NORMAL         MAKEINTRESOURCEW(32512)
+#define OCR_IBEAM          MAKEINTRESOURCEW(32513)
+#define OCR_WAIT           MAKEINTRESOURCEW(32514)
+#define OCR_CROSS          MAKEINTRESOURCEW(32515)
+#define OCR_UP             MAKEINTRESOURCEW(32516)
+#define OCR_SIZENWSE       MAKEINTRESOURCEW(32642)
+#define OCR_SIZENESW       MAKEINTRESOURCEW(32643)
+#define OCR_SIZEWE         MAKEINTRESOURCEW(32644)
+#define OCR_SIZENS         MAKEINTRESOURCEW(32645)
+#define OCR_SIZEALL        MAKEINTRESOURCEW(32646)
+#define OCR_NO             MAKEINTRESOURCEW(32648)
+#define OCR_HAND           MAKEINTRESOURCEW(32649)
+#define OCR_APPSTARTING    MAKEINTRESOURCEW(32650)
+#endif
+
 namespace zb {
 
 WinInputInjector::WinInputInjector() {
     screenW_ = GetSystemMetrics(SM_CXSCREEN);
     screenH_ = GetSystemMetrics(SM_CYSCREEN);
+    createInvisibleCursor();
+}
+
+WinInputInjector::~WinInputInjector() {
+    // 析构时恢复系统光标，防止光标永久隐藏。
+    setCursorVisible(true);
+    if (invisibleCursor_) {
+        DestroyCursor(invisibleCursor_);
+        invisibleCursor_ = nullptr;
+    }
 }
 
 bool WinInputInjector::inject(const InputEvent& ev) {
@@ -128,6 +160,7 @@ bool WinInputInjector::injectMouseWheel(int32_t delta, bool horizontal) {
 }
 
 bool WinInputInjector::injectKey(uint16_t vkCode, uint16_t scanCode, bool extended, bool down) {
+
     // 跟踪 Win 键状态用于 Win+L 检测。
     if (vkCode == VK_LWIN || vkCode == VK_RWIN) {
         winPressed_ = down;
@@ -154,6 +187,49 @@ bool WinInputInjector::injectKey(uint16_t vkCode, uint16_t scanCode, bool extend
     if (extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     if (!down) input.ki.dwFlags |= KEYEVENTF_KEYUP;
     return SendInput(1, &input, sizeof(INPUT)) == 1;
+}
+
+void WinInputInjector::setCursorVisible(bool visible) {
+    if (visible) {
+        restoreSystemCursor();
+    } else {
+        hideSystemCursor();
+    }
+}
+
+void WinInputInjector::createInvisibleCursor() {
+    // 1x1 全透明光标：AND mask 全 1（保留屏幕像素），XOR mask 全 0（无颜色）。
+    static const WORD andMask = 0xFFFF;
+    static const WORD xorMask = 0x0000;
+    invisibleCursor_ = CreateCursor(nullptr, 0, 0, 1, 1, &andMask, &xorMask);
+}
+
+void WinInputInjector::hideSystemCursor() {
+    if (systemCursorsHidden_) return;
+    if (!invisibleCursor_) return;
+
+    // 替换所有标准系统光标为透明光标，确保无论鼠标悬停在什么窗口上
+    // （文本框、链接、调整大小等）光标都不可见。
+    static const LPCWSTR cursorIds[] = {
+        OCR_NORMAL, OCR_IBEAM, OCR_WAIT, OCR_CROSS,
+        OCR_UP, OCR_SIZENWSE, OCR_SIZENESW, OCR_SIZEWE,
+        OCR_SIZENS, OCR_SIZEALL, OCR_NO, OCR_HAND,
+        OCR_APPSTARTING,
+    };
+    for (auto id : cursorIds) {
+        HCURSOR copy = CopyCursor(invisibleCursor_);
+        if (copy) {
+            SetSystemCursor(copy, reinterpret_cast<DWORD>(id));
+        }
+    }
+    systemCursorsHidden_ = true;
+}
+
+void WinInputInjector::restoreSystemCursor() {
+    if (!systemCursorsHidden_) return;
+    // SPI_SETCURSORS 从注册表重新加载默认光标，撤销所有 SetSystemCursor 替换。
+    SystemParametersInfoW(SPI_SETCURSORS, 0, nullptr, 0);
+    systemCursorsHidden_ = false;
 }
 
 } // namespace zb

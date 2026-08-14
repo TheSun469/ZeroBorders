@@ -450,8 +450,8 @@ ZeroBorders/
 {
     "role": 0,
     "rolePreference": 0,
-    "pairingCode": "test123",
-    "username": "user",
+    "pairingCode": "",
+    "username": "",
     "serverName": "",
     "host": "",
     "layout": "left_of",
@@ -467,8 +467,8 @@ ZeroBorders/
 |------|------|
 | `role` | 0=Server（控制端），1=Client（被控端） |
 | `rolePreference` | 自动模式下的偏好：0=自动，1=优先控制端，2=优先被控端 |
-| `pairingCode` | 配对码，两端需一致 |
-| `username` | 用户名，与配对码组合进行双重认证，两端需一致 |
+| `pairingCode` | 配对码，两端需一致。默认为空，首次使用需自行输入 |
+| `username` | 用户名，与配对码组合进行双重认证，两端需一致。默认为空，首次使用需自行输入 |
 | `layout` | 相对布局：`left_of` / `right_of` / `above` / `below` |
 | `receiveDir` | 接收文件目录，留空则使用系统临时目录 |
 | `startMinimized` | 是否启动时最小化到托盘 |

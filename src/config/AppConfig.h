@@ -14,11 +14,13 @@ struct AppConfig {
     int rolePreference = 0;
 
     // Shared pairing code (plaintext locally; only hash goes over network).
-    std::string pairingCode = "test123";
+    // 默认为空，强制用户首次使用时自行输入，避免多人使用相同默认值导致误连。
+    std::string pairingCode;
 
     // Username as secondary authentication factor (combined with pairing code
     // to derive the token hash, preventing same-code collisions in LAN).
-    std::string username = "user";
+    // 默认为空，强制用户首次使用时自行输入。
+    std::string username;
 
     // Server display name (hostname used when empty).
     std::string serverName;

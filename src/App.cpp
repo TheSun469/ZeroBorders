@@ -1072,9 +1072,16 @@ void App::wireClientCallbacks() {
     client_->onControlMessage([this](MsgType t, const std::vector<uint8_t>& p) {
         try {
             if (t == MsgType::InputEvent) {
-                if (hasControl_.load()) {
-                    InputEvent ev{};
-                    if (parseInputEvent(p, ev)) injector_->inject(ev);
+                InputEvent ev{};
+                if (parseInputEvent(p, ev)) {
+                    // 键盘事件总是注入：控制端只在 keyboardControl_=true 时
+                    // 才转发键盘，所以收到键盘事件就意味着键盘控制权在对端。
+                    // 鼠标事件检查 hasControl_：只有 CursorEnter 后才注入。
+                    if (ev.type == EventType::KeyDown || ev.type == EventType::KeyUp) {
+                        injector_->inject(ev);
+                    } else if (hasControl_.load()) {
+                        injector_->inject(ev);
+                    }
                 }
             } else if (t == MsgType::CursorEnter) {
                 CursorEnterMsg msg{};
@@ -1088,10 +1095,10 @@ void App::wireClientCallbacks() {
                     injector_->setCursorVisible(true);
                 }
             } else if (t == MsgType::CursorLeave) {
-                // 控制端鼠标已返回，被控端停止接受输入注入并隐藏本地光标，
-                // 避免被控端屏幕上残留静止光标干扰用户在控制端的操作。
+                // 控制端鼠标已返回，被控端停止鼠标注入并隐藏本地光标。
+                // 不释放修饰键：键盘控制权可能仍在对端，等控制端左键点击
+                // 本地后通过 ReleaseKeys 回调发送 KeyUp 事件来释放。
                 hasControl_ = false;
-                injector_->releaseAllKeys();
                 injector_->setCursorVisible(false);
             } else if (t == MsgType::Ping) {
                 uint64_t ts = 0;

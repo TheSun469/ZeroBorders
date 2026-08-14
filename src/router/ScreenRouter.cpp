@@ -57,6 +57,19 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
         return false;
     }
 
+    // 键盘事件独立于鼠标位置处理。keyboardControl_ 决定键盘去向：
+    // true  → 转发到对端并拦截本机（键盘在对端）
+    // false → 本机正常处理（键盘在本地）
+    // 这样鼠标跨屏不会影响键盘，只有左键点击才切换键盘控制权，
+    // 无论鼠标在哪一侧。
+    if (ev.type == EventType::KeyDown || ev.type == EventType::KeyUp) {
+        if (keyboardControl_) {
+            if (sendCb_) sendCb_(ev);
+            return true;   // 拦截，不传给本机
+        }
+        return false;       // 不拦截，本机正常处理
+    }
+
     if (remoteControl_.load()) {
         // 鼠标控制权在对端：鼠标移动和点击始终转发给对端。
         InputEvent mapped = ev;
@@ -118,16 +131,6 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
             return true;
         }
 
-        // 键盘事件：只有 keyboardControl_ 为 true 时才转发给对端，
-        // 否则让按键在本机生效（不拦截）。
-        if (ev.type == EventType::KeyDown || ev.type == EventType::KeyUp) {
-            if (keyboardControl_) {
-                if (sendCb_) sendCb_(mapped);
-                return true;   // 拦截，不传给本机
-            }
-            return false;       // 不拦截，本机正常处理
-        }
-
         // 滚轮跟随鼠标，始终转发给对端。
         if (sendCb_) sendCb_(mapped);
         return true;
@@ -145,16 +148,27 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
         return false;
     }
 
-    // 本地模式下，键盘和鼠标点击不拦截（本机正常处理）。
+    // 本地模式下鼠标点击：左键按下时切换键盘控制权回本地。
+    // 鼠标已回本地但键盘可能仍在对端，只有左键点击才把键盘切回，
+    // 并通知对端释放修饰键（Ctrl/Shift/Alt/Win）。
+    if (ev.type == EventType::MouseButton) {
+        if (ev.mouseButton.button == MouseButton::Left && ev.mouseButton.pressed) {
+            if (keyboardControl_) {
+                keyboardControl_ = false;
+                if (releaseKeysCb_) releaseKeysCb_();
+            }
+        }
+        return false;  // 本机正常处理
+    }
+
     return false;
 }
 
 void ScreenRouter::enterRemoteControl(int32_t mouseX, int32_t mouseY) {
     remoteControl_ = true;
-    // 每次进入对端时重置键盘控制权，确保必须再次左键点击才能切换键盘。
-    // 不重置的话，上一次左键点击设置的 keyboardControl_=true 会残留，
-    // 导致鼠标再次进入客户端时键盘直接转发到对端。
-    keyboardControl_ = false;
+    // 不重置 keyboardControl_：键盘控制权独立于鼠标位置。
+    // 如果之前键盘在本地（false），进入对端后仍需左键点击才切换到对端；
+    // 如果之前键盘在对端（如返回本地后未点击又进入对端），保持不变。
 
     CursorEnterMsg enter = calcEntryPoint(mouseX, mouseY);
     clientCursorX_ = enter.x;
@@ -191,19 +205,18 @@ void ScreenRouter::enterRemoteControl(int32_t mouseX, int32_t mouseY) {
 
 void ScreenRouter::returnToLocalControl(Edge clientEdge) {
     remoteControl_ = false;
-    // 返回本地时重置键盘控制权，下次进入对端需要重新左键点击切换。
-    keyboardControl_ = false;
+    // 不重置 keyboardControl_，不释放修饰键：键盘控制权独立于鼠标。
+    // 鼠标返回本地后键盘可能仍在对端，只有用户在本地左键点击后
+    // 才切回本地并释放对端修饰键（见 processEvent 本地模式左键处理）。
 
     int32_t x = 0, y = 0;
     calcReturnPosition(clientEdge, x, y);
 
     ZB_LOG_INFO("Cursor returning -> server at ({}, {})", x, y);
 
-    // 通知被控端光标已离开，被控端据此隐藏本地光标并停止接受输入注入。
+    // 通知被控端光标已离开，被控端据此隐藏本地光标并停止鼠标注入。
+    // 不释放修饰键：键盘可能仍在对端。
     if (leaveCb_) leaveCb_(clientEdge);
-
-    // 通知被控端释放所有修饰键，防止 Ctrl/Shift/Alt/Win 在对端残留。
-    if (releaseKeysCb_) releaseKeysCb_();
 
     // Update last known position so immediate re-entry calculates the
     // correct entry Y coordinate.

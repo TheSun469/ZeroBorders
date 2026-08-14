@@ -238,6 +238,78 @@ void App::handlePeerSessionLock(bool locked) {
     }
 }
 
+void App::sendLockPeer() {
+    if (!running_.load() || !connected_.load()) return;
+    ZB_LOG_INFO("Sending LockPeer request (Win+L forwarded)");
+    std::vector<uint8_t> empty;
+    if (isServer_.load()) {
+        if (server_ && server_->isReady())
+            server_->sendControl(MsgType::LockPeer, empty);
+    } else {
+        if (client_ && client_->isReady())
+            client_->sendControl(MsgType::LockPeer, empty);
+    }
+}
+
+void App::handleLockPeer() {
+    ZB_LOG_INFO("Received LockPeer request, locking local workstation");
+    if (!LockWorkStation()) {
+        ZB_LOG_ERROR("LockWorkStation failed: {}", GetLastError());
+    }
+    // LockWorkStation is async; the resulting WTS_SESSION_LOCK will trigger
+    // onSessionLock() which notifies the peer.
+}
+
+void App::flushPendingWin() {
+    if (!winPending_) return;
+    winPending_ = false;
+    if (router_) router_->processEvent(pendingWinEvent_);
+}
+
+bool App::onCapturedEvent(const InputEvent& ev) {
+    bool isWinKey = (ev.type == EventType::KeyDown || ev.type == EventType::KeyUp) &&
+                    (ev.key.vkCode == VK_LWIN || ev.key.vkCode == VK_RWIN);
+    bool remoteMode = (router_ && router_->isRemoteControl());
+
+    if (remoteMode) {
+        // 远程控制模式：所有事件都拦截本地并转发给对端。
+        // 额外处理 Win+L：SendInput 注入的 Win+L 无法可靠锁屏，
+        // 因此检测到 Win+L 时改为发送 LockPeer 专用消息。
+        if (ev.type == EventType::KeyDown && isWinKey) {
+            // 暂存 Win KeyDown，等待判断是否为 Win+L 组合。
+            winPending_ = true;
+            pendingWinEvent_ = ev;
+            return true;
+        }
+        if (ev.type == EventType::KeyUp && isWinKey) {
+            if (winPending_) {
+                // Win 单击（Down 尚未发送），丢弃暂存，不触发开始菜单。
+                winPending_ = false;
+            } else {
+                // Win Down 已发送，正常转发 Win Up。
+                if (router_) router_->processEvent(ev);
+            }
+            return true;
+        }
+        // Win+L 检测
+        if (ev.type == EventType::KeyDown && ev.key.vkCode == 'L' && winPending_) {
+            // 命中 Win+L：丢弃暂存的 Win，发送 LockPeer 锁定对端。
+            winPending_ = false;
+            sendLockPeer();
+            return true;
+        }
+        // 其他按键：先补发暂存的 Win KeyDown，再处理当前事件。
+        flushPendingWin();
+        if (router_) return router_->processEvent(ev);
+        return true;
+    }
+
+    // 本地控制模式：Win+L 正常锁定本机（系统默认行为），其余事件交给路由器。
+    winPending_ = false;
+    if (router_) return router_->processEvent(ev);
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Remote directory listing
 // ---------------------------------------------------------------------------
@@ -538,8 +610,7 @@ void App::launchServer(const AppConfig& cfg, bool enableDiscovery) {
         enableDiscovery);
 
     capturer_->start([this](const InputEvent& ev) -> bool {
-        if (server_ && server_->isReady()) return router_->processEvent(ev);
-        return false;
+        return onCapturedEvent(ev);
     });
 }
 
@@ -981,6 +1052,8 @@ void App::wireServerCallbacks() {
             } else if (t == MsgType::SessionLock) {
                 SessionLockMsg msg{};
                 if (parseSessionLock(p, msg)) handlePeerSessionLock(msg.state != 0);
+            } else if (t == MsgType::LockPeer) {
+                handleLockPeer();
             } else if (fileTransfer_ &&
                        (t == MsgType::FileOffer || t == MsgType::FileAccept ||
                         t == MsgType::TransferProgress || t == MsgType::TransferComplete)) {
@@ -1076,6 +1149,8 @@ void App::wireClientCallbacks() {
             } else if (t == MsgType::SessionLock) {
                 SessionLockMsg msg{};
                 if (parseSessionLock(p, msg)) handlePeerSessionLock(msg.state != 0);
+            } else if (t == MsgType::LockPeer) {
+                handleLockPeer();
             } else if (fileTransfer_ &&
                        (t == MsgType::FileOffer || t == MsgType::FileAccept ||
                         t == MsgType::TransferProgress || t == MsgType::TransferComplete)) {

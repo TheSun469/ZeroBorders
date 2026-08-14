@@ -75,6 +75,12 @@ private:
     std::atomic<bool> remoteControl_{false};
     std::mutex mutex_;
 
+    // 待切换状态：鼠标到达边缘但等待左键点击才真正切换控制权。
+    // pendingCross_: 本地→远程（控制端→被控端）待切换
+    // pendingReturn_: 远程→本地（被控端→控制端）待返回
+    bool pendingCross_ = false;
+    bool pendingReturn_ = false;
+
     CursorEnterCallback enterCb_;
     SuppressCallback suppressCb_;
     WarpCursorCallback warpCb_;

@@ -18,6 +18,8 @@ void ScreenRouter::configure(uint32_t serverW, uint32_t serverH,
     clientH_ = clientH;
     layout_ = layout;
     remoteControl_ = false;
+    pendingCross_ = false;
+    pendingReturn_ = false;
     clientCursorX_ = -1;
     clientCursorY_ = -1;
     clientCursorAccumX_ = 0.0;
@@ -37,6 +39,8 @@ void ScreenRouter::setLayout(ScreenLayout layout) {
         if (suppressCb_) suppressCb_(false);
         if (cursorVisibleCb_) cursorVisibleCb_(true);
     }
+    pendingCross_ = false;
+    pendingReturn_ = false;
     clientCursorX_ = -1;
     clientCursorY_ = -1;
     clientCursorAccumX_ = 0.0;
@@ -94,10 +98,18 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
 
             // Check if the cursor crossed the return edge on the client.
             if (isAtReturnEdge(clientCursorX_, clientCursorY_)) {
-                Edge retEdge = clientReturnEdge(layout_);
-                returnToLocalControl(retEdge);
+                // 鼠标到达返回边缘，进入待返回状态，等待左键点击才切换。
+                pendingReturn_ = true;
+                // 仍然 warp 回中心，继续转发移动事件。
+                if (warpCb_) warpCb_(centerX, centerY);
+                mapped.mouseMove.x = clientCursorX_;
+                mapped.mouseMove.y = clientCursorY_;
+                if (sendCb_) sendCb_(mapped);
                 return true;
             }
+
+            // 离开返回边缘，取消待返回状态。
+            pendingReturn_ = false;
 
             // Warp cursor back to center for next delta calculation
             if (warpCb_) warpCb_(centerX, centerY);
@@ -106,6 +118,15 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
             mapped.mouseMove.y = clientCursorY_;
 
         } else if (ev.type == EventType::MouseButton) {
+            // 在待返回状态下，左键按下触发返回本地控制。
+            if (pendingReturn_ &&
+                ev.mouseButton.button == MouseButton::Left &&
+                ev.mouseButton.pressed) {
+                Edge retEdge = clientReturnEdge(layout_);
+                pendingReturn_ = false;
+                returnToLocalControl(retEdge);
+                return true;  // 吞掉这个点击事件，不转发给被控端
+            }
             mapped.mouseButton.x = clientCursorX_;
             mapped.mouseButton.y = clientCursorY_;
         }
@@ -114,17 +135,29 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
         return true;
     }
 
-    // Control is local. Only inspect mouse moves for edge crossing.
-    if (ev.type != EventType::MouseMove) {
+    // 本地控制模式。
+    if (ev.type == EventType::MouseMove) {
+        lastMouseX_ = ev.mouseMove.x;
+        lastMouseY_ = ev.mouseMove.y;
+
+        if (isAtCrossEdge(ev.mouseMove.x, ev.mouseMove.y)) {
+            // 鼠标到达交叉边缘，进入待切换状态，等待左键点击。
+            pendingCross_ = true;
+        } else {
+            // 离开边缘，取消待切换状态。
+            pendingCross_ = false;
+        }
+        // 不拦截，让鼠标在本地正常移动。
         return false;
     }
 
-    lastMouseX_ = ev.mouseMove.x;
-    lastMouseY_ = ev.mouseMove.y;
-
-    if (isAtCrossEdge(ev.mouseMove.x, ev.mouseMove.y)) {
-        enterRemoteControl(ev.mouseMove.x, ev.mouseMove.y);
-        return true;
+    // 在待切换状态下，左键按下触发进入远程控制。
+    if (pendingCross_ && ev.type == EventType::MouseButton &&
+        ev.mouseButton.button == MouseButton::Left &&
+        ev.mouseButton.pressed) {
+        pendingCross_ = false;
+        enterRemoteControl(ev.mouseButton.x, ev.mouseButton.y);
+        return true;  // 吞掉这个点击事件
     }
 
     return false;
@@ -205,6 +238,8 @@ void ScreenRouter::handleCursorLeave(Edge clientEdge) {
 
 void ScreenRouter::forceLocalControl() {
     std::lock_guard<std::mutex> lk(mutex_);
+    pendingCross_ = false;
+    pendingReturn_ = false;
     if (remoteControl_.load()) {
         remoteControl_ = false;
         if (releaseKeysCb_) releaseKeysCb_();

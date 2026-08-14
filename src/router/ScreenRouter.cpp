@@ -150,6 +150,10 @@ bool ScreenRouter::processEvent(const InputEvent& ev) {
 
 void ScreenRouter::enterRemoteControl(int32_t mouseX, int32_t mouseY) {
     remoteControl_ = true;
+    // 每次进入对端时重置键盘控制权，确保必须再次左键点击才能切换键盘。
+    // 不重置的话，上一次左键点击设置的 keyboardControl_=true 会残留，
+    // 导致鼠标再次进入客户端时键盘直接转发到对端。
+    keyboardControl_ = false;
 
     CursorEnterMsg enter = calcEntryPoint(mouseX, mouseY);
     clientCursorX_ = enter.x;
@@ -186,6 +190,8 @@ void ScreenRouter::enterRemoteControl(int32_t mouseX, int32_t mouseY) {
 
 void ScreenRouter::returnToLocalControl(Edge clientEdge) {
     remoteControl_ = false;
+    // 返回本地时重置键盘控制权，下次进入对端需要重新左键点击切换。
+    keyboardControl_ = false;
 
     int32_t x = 0, y = 0;
     calcReturnPosition(clientEdge, x, y);

@@ -26,7 +26,6 @@ enum class MsgType : uint8_t {
     ListDirResponse  = 0x0C,  // 返回目录条目列表
     FilePullRequest  = 0x0D,  // 请求对端发送指定文件（下载）
     SessionLock      = 0x0E,  // 会话锁屏/解锁通知（1=locked, 0=unlocked）
-    LockPeer         = 0x0F,  // 请求对端锁定工作站（Win+L 转发）
 
     ClipboardText    = 0x10,
     ClipboardNotify  = 0x11,

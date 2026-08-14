@@ -99,12 +99,6 @@ public:
     void onSessionLock();
     void onSessionUnlock();
 
-    // Capturer callback: routes events through the router and detects
-    // Win+L in remote mode to lock the peer (SendInput-injected Win+L
-    // can't lock the secure desktop reliably, so we send a dedicated
-    // protocol message instead).
-    bool onCapturedEvent(const InputEvent& ev);
-
 signals:
     void statusChanged(const QString& status);
     void connectionChanged(bool connected, const QString& peerName,
@@ -152,12 +146,6 @@ private:
     void handleFilePullRequest(const std::vector<uint8_t>& payload);
     // 处理对端发来的会话锁屏/解锁通知。
     void handlePeerSessionLock(bool locked);
-    // 请求对端锁定工作站（控制端 Win+L 转发）。
-    void sendLockPeer();
-    // 处理对端发来的锁定请求：调用 LockWorkStation() 锁定本机。
-    void handleLockPeer();
-    // 在远程模式下 flush 暂存的 Win KeyDown（非 Win+L 组合时补发）。
-    void flushPendingWin();
     // 扫描本地目录并返回条目（UTF-8 路径安全）。
     static std::vector<DirEntry> scanLocalDirectory(const std::string& dirUtf8,
                                                     bool& ok);
@@ -206,11 +194,6 @@ private:
     std::atomic<bool> applyingRemoteLayout_{false};
     // 对端会话是否处于锁屏状态。
     std::atomic<bool> peerLocked_{false};
-
-    // Win+L 检测状态机（仅在控制端远程模式下使用，capturer 回调线程访问）。
-    // Win KeyDown 到达时暂存，若下一个键是 L 则触发 LockPeer，否则补发 Win。
-    bool winPending_ = false;
-    InputEvent pendingWinEvent_{};
 
     // Tracks transfer IDs that originated from clipboard (auto-accept, put
     // received files into clipboard on completion).

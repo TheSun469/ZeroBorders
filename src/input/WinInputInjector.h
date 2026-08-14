@@ -28,6 +28,10 @@ private:
     int screenH_ = 0;
     int lastX_ = 0;
     int lastY_ = 0;
+
+    // Win+L 检测：SendInput 注入的 Win+L 无法锁屏，检测到组合时
+    // 直接调用 LockWorkStation()。
+    bool winPressed_ = false;
 };
 
 } // namespace zb

@@ -94,6 +94,24 @@ bool WinInputInjector::injectMouseWheel(int32_t delta, bool horizontal) {
 }
 
 bool WinInputInjector::injectKey(uint16_t vkCode, uint16_t scanCode, bool extended, bool down) {
+    // 跟踪 Win 键状态用于 Win+L 检测。
+    if (vkCode == VK_LWIN || vkCode == VK_RWIN) {
+        winPressed_ = down;
+        // Win 键正常注入，让其他 Win 组合键也能工作。
+    } else if (winPressed_ && vkCode == 'L' && down) {
+        // 命中 Win+L：SendInput 注入的 Win+L 无法锁屏，
+        // 直接调用 LockWorkStation()。
+        // 先释放 Win 键（避免锁屏后键状态残留）。
+        INPUT winUp{};
+        winUp.type = INPUT_KEYBOARD;
+        winUp.ki.wVk = VK_LWIN;
+        winUp.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, &winUp, sizeof(INPUT));
+        winPressed_ = false;
+        LockWorkStation();
+        return true;
+    }
+
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = vkCode;

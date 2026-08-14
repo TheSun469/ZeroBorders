@@ -172,6 +172,73 @@ void App::applyRemotePath(const std::string& dir) {
 }
 
 // ---------------------------------------------------------------------------
+// Session lock/unlock handling
+// ---------------------------------------------------------------------------
+// When the local Windows session locks, SendInput is ignored on the secure
+// desktop, so any remote-control cursor would be stuck. We force control back
+// to the local side and tell the peer we're locked so it can do the same.
+// On unlock we re-sync state (layout, clipboard, path, remote dir listing)
+// so cross-machine operation resumes seamlessly.
+
+void App::onSessionLock() {
+    if (!running_.load()) return;
+    // Force local control regardless of connection state — the router may
+    // still be in remote-control mode and we don't want the cursor stuck.
+    if (router_) router_->forceLocalControl();
+    setStatus(QStringLiteral("本地会话已锁定，已切换到本地控制"));
+    if (connected_.load()) {
+        SessionLockMsg msg{1};
+        auto payload = serializeSessionLock(msg);
+        if (isServer_.load()) {
+            if (server_ && server_->isReady())
+                server_->sendControl(MsgType::SessionLock, payload);
+        } else {
+            if (client_ && client_->isReady())
+                client_->sendControl(MsgType::SessionLock, payload);
+        }
+    }
+}
+
+void App::onSessionUnlock() {
+    if (!running_.load()) return;
+    setStatus(QStringLiteral("本地会话已解锁"));
+    if (connected_.load()) {
+        // Notify peer we're back so it can resume remote control.
+        SessionLockMsg msg{0};
+        auto payload = serializeSessionLock(msg);
+        if (isServer_.load()) {
+            if (server_ && server_->isReady())
+                server_->sendControl(MsgType::SessionLock, payload);
+        } else {
+            if (client_ && client_->isReady())
+                client_->sendControl(MsgType::SessionLock, payload);
+        }
+        // Re-sync state so cross-machine operation resumes cleanly.
+        sendLayoutSync();
+        sendPathSync();
+        if (clipboard_) clipboard_->syncNow();
+        requestRemoteDirList("");
+        setStatus(QStringLiteral("本地会话已解锁，状态已重新同步"));
+    }
+}
+
+void App::handlePeerSessionLock(bool locked) {
+    peerLocked_ = locked;
+    if (locked) {
+        // Peer's session is locked — it can't process injected input. If we
+        // were remotely controlling it, fall back to local control so the
+        // cursor isn't stuck on a desktop that ignores SendInput.
+        if (router_) router_->forceLocalControl();
+        setStatus(QStringLiteral("对端会话已锁定，跨屏操作暂停，解锁后自动恢复"));
+    } else {
+        // Peer unlocked — re-sync our clipboard so the peer has the latest
+        // content (the secure desktop may have cleared/altered state).
+        if (clipboard_) clipboard_->syncNow();
+        setStatus(QStringLiteral("对端会话已解锁，可继续跨屏操作"));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Remote directory listing
 // ---------------------------------------------------------------------------
 
@@ -911,6 +978,9 @@ void App::wireServerCallbacks() {
                 handleListDirResponse(p);
             } else if (t == MsgType::FilePullRequest) {
                 handleFilePullRequest(p);
+            } else if (t == MsgType::SessionLock) {
+                SessionLockMsg msg{};
+                if (parseSessionLock(p, msg)) handlePeerSessionLock(msg.state != 0);
             } else if (fileTransfer_ &&
                        (t == MsgType::FileOffer || t == MsgType::FileAccept ||
                         t == MsgType::TransferProgress || t == MsgType::TransferComplete)) {
@@ -1003,6 +1073,9 @@ void App::wireClientCallbacks() {
                 handleListDirResponse(p);
             } else if (t == MsgType::FilePullRequest) {
                 handleFilePullRequest(p);
+            } else if (t == MsgType::SessionLock) {
+                SessionLockMsg msg{};
+                if (parseSessionLock(p, msg)) handlePeerSessionLock(msg.state != 0);
             } else if (fileTransfer_ &&
                        (t == MsgType::FileOffer || t == MsgType::FileAccept ||
                         t == MsgType::TransferProgress || t == MsgType::TransferComplete)) {

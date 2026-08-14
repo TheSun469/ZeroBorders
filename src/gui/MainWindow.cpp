@@ -42,6 +42,12 @@
 
 #include <filesystem>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <wtsapi32.h>
+
 namespace fs = std::filesystem;
 
 namespace zb {
@@ -50,7 +56,7 @@ static QIcon makeTrayIcon(bool connected);
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(QStringLiteral("零界 ZeroBorders - 局域网键鼠共享"));
-    resize(720, 760);
+    resize(980, 800);
 
     buildUi();
     buildMenuBar();
@@ -73,9 +79,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     buildTrayIcon();
     roleLabel_->setText(QStringLiteral("角色：未连接"));
     ZB_LOG_INFO("ZeroBorders GUI ready");
+
+    // Register for Windows session lock/unlock notifications so we can
+    // suspend remote control while the secure desktop (lock screen) is
+    // active — SendInput is ignored on the secure desktop, and without
+    // handling this the cross-machine cursor gets stuck.
+    WTSRegisterSessionNotification(reinterpret_cast<HWND>(winId()),
+                                   NOTIFY_FOR_THIS_SESSION);
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+    WTSUnRegisterSessionNotification(reinterpret_cast<HWND>(winId()));
+}
 
 // ---------------------------------------------------------------------------
 // UI construction
@@ -844,6 +859,24 @@ void MainWindow::appendLog(const QString& line, const QString& tag) {
 // ---------------------------------------------------------------------------
 // Close behavior: X button minimizes to tray
 // ---------------------------------------------------------------------------
+
+bool MainWindow::nativeEvent(const QByteArray& eventType, void* message,
+                             qintptr* result) {
+    MSG* msg = static_cast<MSG*>(message);
+    if (msg->message == WM_WTSSESSION_CHANGE) {
+        switch (msg->wParam) {
+            case WTS_SESSION_LOCK:
+                app_.onSessionLock();
+                break;
+            case WTS_SESSION_UNLOCK:
+                app_.onSessionUnlock();
+                break;
+            default:
+                break;
+        }
+    }
+    return QMainWindow::nativeEvent(eventType, message, result);
+}
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (quitting_) {

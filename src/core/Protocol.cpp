@@ -352,6 +352,20 @@ bool parseFilePullRequest(const std::vector<uint8_t>& d, FilePullRequestMsg& out
     return r.ok();
 }
 
+// ---- Session lock notification ----
+
+std::vector<uint8_t> serializeSessionLock(const SessionLockMsg& m) {
+    Writer w;
+    w.u8(m.state);
+    return w.take();
+}
+
+bool parseSessionLock(const std::vector<uint8_t>& d, SessionLockMsg& out) {
+    Reader r(d);
+    out.state = r.u8();
+    return r.ok();
+}
+
 // ---- Clipboard serialization ----
 
 std::vector<uint8_t> serializeClipboardText(const ClipboardTextMsg& m) {

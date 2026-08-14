@@ -95,6 +95,10 @@ public:
     // Install a log sink that forwards log lines via logMessage signal.
     void installLogSink();
 
+    // Called by the GUI when the local Windows session locks/unlocks.
+    void onSessionLock();
+    void onSessionUnlock();
+
 signals:
     void statusChanged(const QString& status);
     void connectionChanged(bool connected, const QString& peerName,
@@ -140,6 +144,8 @@ private:
     void handleListDirResponse(const std::vector<uint8_t>& payload);
     // 处理对端发来的文件下载请求。
     void handleFilePullRequest(const std::vector<uint8_t>& payload);
+    // 处理对端发来的会话锁屏/解锁通知。
+    void handlePeerSessionLock(bool locked);
     // 扫描本地目录并返回条目（UTF-8 路径安全）。
     static std::vector<DirEntry> scanLocalDirectory(const std::string& dirUtf8,
                                                     bool& ok);
@@ -186,6 +192,8 @@ private:
     std::atomic<bool> connected_{false};
     // 正在应用对端推送的布局，避免 setLayout 再次回发造成回环。
     std::atomic<bool> applyingRemoteLayout_{false};
+    // 对端会话是否处于锁屏状态。
+    std::atomic<bool> peerLocked_{false};
 
     // Tracks transfer IDs that originated from clipboard (auto-accept, put
     // received files into clipboard on completion).

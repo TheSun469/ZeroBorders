@@ -69,6 +69,7 @@ target_link_libraries(ZeroBorders PRIVATE
     user32
     gdi32
     dbghelp
+    wtsapi32
 )
 
 set_target_properties(ZeroBorders PROPERTIES

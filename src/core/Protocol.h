@@ -25,6 +25,7 @@ enum class MsgType : uint8_t {
     ListDirRequest   = 0x0B,  // 请求列出对端指定目录
     ListDirResponse  = 0x0C,  // 返回目录条目列表
     FilePullRequest  = 0x0D,  // 请求对端发送指定文件（下载）
+    SessionLock      = 0x0E,  // 会话锁屏/解锁通知（1=locked, 0=unlocked）
 
     ClipboardText    = 0x10,
     ClipboardNotify  = 0x11,
@@ -202,6 +203,17 @@ struct FilePullRequestMsg {
 
 std::vector<uint8_t> serializeFilePullRequest(const FilePullRequestMsg& m);
 bool parseFilePullRequest(const std::vector<uint8_t>& d, FilePullRequestMsg& out);
+
+// ---- Session lock notification ----
+// Sent over the control channel when the local Windows session locks/unlocks,
+// so the peer knows input injection is suspended and can fall back to local
+// control. state=1 means locked, state=0 means unlocked.
+struct SessionLockMsg {
+    uint8_t state = 0;  // 1 = locked, 0 = unlocked
+};
+
+std::vector<uint8_t> serializeSessionLock(const SessionLockMsg& m);
+bool parseSessionLock(const std::vector<uint8_t>& d, SessionLockMsg& out);
 
 // ---- Clipboard serialization (Phase 4) ----
 

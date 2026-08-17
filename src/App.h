@@ -3,6 +3,8 @@
 #include "config/AppConfig.h"
 #include "core/Protocol.h"
 #include "core/ScreenLayout.h"
+#include "input/IInputCapturer.h"
+#include "input/IInputInjector.h"
 #include "network/UdpDiscovery.h"
 #include "router/InputEventSender.h"
 
@@ -23,8 +25,8 @@ namespace zb {
 
 class NetworkServer;
 class NetworkClient;
-class WinInputCapturer;
-class WinInputInjector;
+class IInputCapturer;
+class IInputInjector;
 class ClipboardManager;
 class ScreenRouter;
 class FileTransferManager;
@@ -176,8 +178,8 @@ private:
     std::unique_ptr<UdpDiscovery> autoDiscovery_;
     std::unique_ptr<NetworkServer> server_;
     std::unique_ptr<NetworkClient> client_;
-    std::unique_ptr<WinInputCapturer> capturer_;
-    std::unique_ptr<WinInputInjector> injector_;
+    std::unique_ptr<IInputCapturer> capturer_;
+    std::unique_ptr<IInputInjector> injector_;
     std::unique_ptr<ClipboardManager> clipboard_;
     std::unique_ptr<ScreenRouter> router_;
     std::unique_ptr<FileTransferManager> fileTransfer_;

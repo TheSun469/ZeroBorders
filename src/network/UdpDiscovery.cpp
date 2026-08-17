@@ -10,11 +10,28 @@
 #ifdef _WIN32
 #include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
+#else
+#include <ifaddrs.h>
+#include <net/if.h>
 #endif
 
 namespace zb {
 
 namespace {
+
+// Cross-platform helper: set SO_RCVTIMEO. Windows accepts milliseconds in a
+// DWORD; POSIX requires a struct timeval.
+inline void setRcvTimeout(socket_t s, int timeoutMs) {
+#ifdef _WIN32
+    DWORD t = static_cast<DWORD>(timeoutMs);
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&t), sizeof(t));
+#else
+    struct timeval tv;
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#endif
+}
 
 // Enumerate all active IPv4 interfaces and compute their directed broadcast
 // addresses (e.g. 192.168.1.255).  Sending to 255.255.255.255 alone is
@@ -65,6 +82,45 @@ std::vector<in_addr> collectBroadcastAddresses() {
             if (!dup) result.push_back(bcast);
         }
     }
+#else
+    struct ifaddrs* ifap = nullptr;
+    if (getifaddrs(&ifap) != 0) {
+        ZB_LOG_WARN("getifaddrs failed: {}, using 255.255.255.255 only", errno);
+        return result;
+    }
+
+    for (struct ifaddrs* ifa = ifap; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (ifa->ifa_addr->sa_family != AF_INET) continue;
+        // Skip interfaces that are down or loopback.
+        if ((ifa->ifa_flags & IFF_UP) == 0) continue;
+        if ((ifa->ifa_flags & IFF_LOOPBACK)) continue;
+        if ((ifa->ifa_flags & IFF_BROADCAST) == 0) continue;
+
+        auto* sa = reinterpret_cast<sockaddr_in*>(ifa->ifa_addr);
+        in_addr ipAddr = sa->sin_addr;
+        if (ipAddr.s_addr == 0) continue;
+        // Skip 127.x.x.x
+        if ((ipAddr.s_addr & htonl(0xFF000000)) == htonl(0x7F000000)) continue;
+
+        in_addr bcast{};
+        if (ifa->ifa_broadaddr) {
+            bcast = reinterpret_cast<sockaddr_in*>(ifa->ifa_broadaddr)->sin_addr;
+        } else if (ifa->ifa_netmask) {
+            in_addr mask = reinterpret_cast<sockaddr_in*>(ifa->ifa_netmask)->sin_addr;
+            bcast.s_addr = (ipAddr.s_addr & mask.s_addr) | ~mask.s_addr;
+        } else {
+            continue;
+        }
+
+        bool dup = false;
+        for (auto& a : result) {
+            if (a.s_addr == bcast.s_addr) { dup = true; break; }
+        }
+        if (!dup) result.push_back(bcast);
+    }
+    freeifaddrs(ifap);
+#endif
 
     ZB_LOG_INFO("Broadcast targets:");
     for (auto& a : result) {
@@ -72,7 +128,6 @@ std::vector<in_addr> collectBroadcastAddresses() {
         inet_ntop(AF_INET, &a, s, sizeof(s));
         ZB_LOG_INFO("  {}", s);
     }
-#endif
 
     return result;
 }
@@ -110,7 +165,7 @@ void UdpDiscovery::startServer(uint16_t port, const TokenHash& token,
     }
 
     DWORD timeoutMs = 1000;
-    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+    setRcvTimeout(sock_, static_cast<int>(timeoutMs));
 
     const std::string tokenHex = tokenToHex(token);
     const std::string announce = nlohmann::json{
@@ -148,7 +203,7 @@ void UdpDiscovery::startServer(uint16_t port, const TokenHash& token,
 
             char rbuf[1024];
             sockaddr_in from{};
-            int fromLen = sizeof(from);
+            socklen_t fromLen = sizeof(from);
             int n = recvfrom(sock_, rbuf, sizeof(rbuf) - 1, 0,
                              reinterpret_cast<sockaddr*>(&from), &fromLen);
             if (n > 0) {
@@ -192,7 +247,7 @@ void UdpDiscovery::startClient(uint16_t port, const TokenHash& token, FoundCallb
     }
 
     DWORD timeoutMs = 2000;
-    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+    setRcvTimeout(sock_, static_cast<int>(timeoutMs));
 
     const std::string tokenHex = tokenToHex(token);
     const std::string response = nlohmann::json{
@@ -206,7 +261,7 @@ void UdpDiscovery::startClient(uint16_t port, const TokenHash& token, FoundCallb
         while (running_.load()) {
             char rbuf[1024];
             sockaddr_in from{};
-            int fromLen = sizeof(from);
+            socklen_t fromLen = sizeof(from);
             int n = recvfrom(sock_, rbuf, sizeof(rbuf) - 1, 0,
                              reinterpret_cast<sockaddr*>(&from), &fromLen);
             if (n <= 0) continue;
@@ -261,7 +316,7 @@ void UdpDiscovery::startAuto(uint16_t port, const TokenHash& token,
     }
 
     DWORD timeoutMs = 500;
-    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+    setRcvTimeout(sock_, static_cast<int>(timeoutMs));
 
     BOOL bcastFlag = TRUE;
     setsockopt(sock_, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&bcastFlag), sizeof(bcastFlag));
@@ -318,7 +373,7 @@ void UdpDiscovery::startAuto(uint16_t port, const TokenHash& token,
                     if (sent == SOCKET_ERROR) {
                         char ip[INET_ADDRSTRLEN]{};
                         inet_ntop(AF_INET, &t.sin_addr, ip, sizeof(ip));
-                        ZB_LOG_WARN("sendto {} failed: WSA{}", ip, WSAGetLastError());
+                        ZB_LOG_WARN("sendto {} failed: err={}", ip, WSAGetLastError());
                     }
                 }
                 ++announceCount;
@@ -332,11 +387,11 @@ void UdpDiscovery::startAuto(uint16_t port, const TokenHash& token,
 
             // Use shorter timeout when in grace period so we can exit promptly
             DWORD tv = found ? 200 : 500;
-            setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+            setRcvTimeout(sock_, static_cast<int>(tv));
 
             char rbuf[1024];
             sockaddr_in from{};
-            int fromLen = sizeof(from);
+            socklen_t fromLen = sizeof(from);
             int n = recvfrom(sock_, rbuf, sizeof(rbuf) - 1, 0,
                              reinterpret_cast<sockaddr*>(&from), &fromLen);
             if (n <= 0) continue;

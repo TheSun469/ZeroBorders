@@ -73,6 +73,12 @@ private:
     // How long to wait for an ACK before aborting (detects dead receiver).
     static constexpr int kAckTimeoutSec = 60;
 
+    // 文件传输速率上限（字节/秒）。限制文件传输占用的最大带宽，
+    // 为键鼠控制通道保留约 1 MB/s 带宽即可保证操作流畅。
+    // 千兆局域网（~125 MB/s）下设为 100 MB/s，留 25 MB/s 余量；
+    // 百兆网（~12.5 MB/s）下此限速不生效，由 TCP 公平性自然分配。
+    static constexpr uint64_t kMaxTransferBps = 100 * 1024 * 1024;
+
     // Build file offer entries from local paths (recursively for directories).
     // entryPaths[i] is the local filesystem path corresponding to entries[i].
     bool buildEntries(const std::vector<std::string>& paths,

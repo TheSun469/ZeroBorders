@@ -1,17 +1,15 @@
 #include "TcpTransport.h"
 #include "../core/Log.h"
 
+// Platform.h (pulled in via TcpTransport.h) provides winsock2.h/ws2tcpip.h on
+// Windows and the POSIX socket headers + closesocket/WSAGetLastError/errno
+// mappings on Linux. Here we only add the platform-specific extras.
 #ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <mstcpip.h>
+#include <mstcpip.h>  // tcp_keepalive, SIO_KEEPALIVE_VALS
+#pragma comment(lib, "ws2_32.lib")
 #else
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#define closesocket close
+#include <netinet/tcp.h>  // TCP_NODELAY, TCP_KEEPIDLE/INTVL/CNT
+#include <fcntl.h>        // fcntl, O_NONBLOCK
 #endif
 
 #include <algorithm>
@@ -25,7 +23,7 @@ TcpTransport::~TcpTransport() {
 }
 
 bool TcpTransport::connect(const std::string& host, uint16_t port, int timeoutMs) {
-    SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    socket_t s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) {
         ZB_LOG_WARN("socket() failed: {}", WSAGetLastError());
         return false;
@@ -34,20 +32,33 @@ bool TcpTransport::connect(const std::string& host, uint16_t port, int timeoutMs
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
+#ifdef _WIN32
     if (InetPtonA(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+#else
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+#endif
         ZB_LOG_WARN("Invalid host address: {}", host);
         closesocket(s);
         return false;
     }
 
     // Non-blocking connect with timeout.
+#ifdef _WIN32
     u_long mode = 1;
     ioctlsocket(s, FIONBIO, &mode);
+#else
+    int flags = ::fcntl(s, F_GETFL, 0);
+    ::fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
 
     int rc = ::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     if (rc == SOCKET_ERROR) {
         int err = WSAGetLastError();
+#ifdef _WIN32
         if (err != WSAEWOULDBLOCK) {
+#else
+        if (err != EINPROGRESS) {
+#endif
             ZB_LOG_WARN("connect() failed: {}", err);
             closesocket(s);
             return false;
@@ -58,7 +69,7 @@ bool TcpTransport::connect(const std::string& host, uint16_t port, int timeoutMs
         timeval tv{};
         tv.tv_sec = timeoutMs / 1000;
         tv.tv_usec = static_cast<long>((timeoutMs % 1000) * 1000);
-        rc = select(0, nullptr, &writeSet, nullptr, &tv);
+        rc = select(static_cast<int>(s) + 1, nullptr, &writeSet, nullptr, &tv);
         if (rc <= 0) {
             ZB_LOG_WARN("connect() timed out or failed: rc={}, err={}", rc, WSAGetLastError());
             closesocket(s);
@@ -66,7 +77,7 @@ bool TcpTransport::connect(const std::string& host, uint16_t port, int timeoutMs
         }
         // Verify the connection actually succeeded.
         int sockErr = 0;
-        int sockErrLen = sizeof(sockErr);
+        socklen_t sockErrLen = sizeof(sockErr);
         if (getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&sockErr), &sockErrLen) < 0
             || sockErr != 0) {
             ZB_LOG_WARN("connect() SO_ERROR: {}", sockErr);
@@ -76,14 +87,19 @@ bool TcpTransport::connect(const std::string& host, uint16_t port, int timeoutMs
     }
 
     // Restore blocking mode.
+#ifdef _WIN32
     mode = 0;
     ioctlsocket(s, FIONBIO, &mode);
+#else
+    ::fcntl(s, F_SETFL, flags);
+#endif
 
     // Disable Nagle for low-latency control channel; data channel can keep it.
     int flag = (channel_ == Channel::Control) ? 1 : 0;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&flag), sizeof(flag));
 
     // Enable keep-alive.
+#ifdef _WIN32
     BOOL keepAlive = TRUE;
     setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&keepAlive), sizeof(keepAlive));
     tcp_keepalive ka{};
@@ -92,6 +108,16 @@ bool TcpTransport::connect(const std::string& host, uint16_t port, int timeoutMs
     ka.keepaliveinterval = 3000;
     DWORD ret = 0;
     WSAIoctl(s, SIO_KEEPALIVE_VALS, &ka, sizeof(ka), nullptr, 0, &ret, nullptr, nullptr);
+#else
+    int keepAlive = 1;
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&keepAlive), sizeof(keepAlive));
+    int keepIdle = 10;   // seconds before first keepalive probe
+    int keepIntvl = 3;   // seconds between probes
+    int keepCnt = 3;     // unanswered probes before dropping
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, reinterpret_cast<const char*>(&keepIdle), sizeof(keepIdle));
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, reinterpret_cast<const char*>(&keepIntvl), sizeof(keepIntvl));
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, reinterpret_cast<const char*>(&keepCnt), sizeof(keepCnt));
+#endif
 
     sock_ = s;
     connected_ = true;
@@ -100,10 +126,15 @@ bool TcpTransport::connect(const std::string& host, uint16_t port, int timeoutMs
     return true;
 }
 
-void TcpTransport::adopt(SOCKET s) {
+void TcpTransport::adopt(socket_t s) {
     // Ensure the accepted socket is blocking (the listener may be non-blocking).
+#ifdef _WIN32
     u_long mode = 0;
     ioctlsocket(s, FIONBIO, &mode);
+#else
+    int flags = ::fcntl(s, F_GETFL, 0);
+    ::fcntl(s, F_SETFL, flags & ~O_NONBLOCK);
+#endif
 
     sock_ = s;
     connected_ = true;
@@ -149,7 +180,7 @@ bool TcpTransport::sendRaw(const std::vector<uint8_t>& frame) {
 void TcpTransport::close() {
     closing_ = true;
 
-    SOCKET s;
+    socket_t s;
     {
         std::lock_guard<std::mutex> lk(sockMutex_);
         s = sock_;
@@ -178,7 +209,7 @@ void TcpTransport::fireDisconnect() {
 
     // Close the socket from this thread to unblock recv(); do NOT join here
     // because we may be running on recvThread_ itself.
-    SOCKET s;
+    socket_t s;
     {
         std::lock_guard<std::mutex> lk(sockMutex_);
         s = sock_;

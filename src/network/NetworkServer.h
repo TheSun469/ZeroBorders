@@ -59,7 +59,7 @@ private:
     void postTeardown(const std::string& reason);
     void teardownImpl(const std::string& reason);
 
-    static SOCKET createListener(uint16_t port);
+    static socket_t createListener(uint16_t port);
 
     TokenHash token_;
     std::string name_;
@@ -74,8 +74,8 @@ private:
     std::atomic<CtrlState> ctrlState_{CtrlState::WaitingHello};
     std::atomic<DataState> dataState_{DataState::WaitingHello};
 
-    SOCKET ctrlListener_ = INVALID_SOCKET;
-    SOCKET dataListener_ = INVALID_SOCKET;
+    socket_t ctrlListener_ = INVALID_SOCKET;
+    socket_t dataListener_ = INVALID_SOCKET;
     std::thread ctrlAcceptThread_;
     std::thread dataAcceptThread_;
     std::thread cleanupThread_;

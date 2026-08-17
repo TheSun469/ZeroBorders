@@ -9,6 +9,7 @@
 #include <QStyleFactory>
 #include <QIcon>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -16,6 +17,14 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <dbghelp.h>
+
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "dbghelp.lib")
+#else
+#include <execinfo.h>  // backtrace
+#include <unistd.h>    // readlink, getpid
+#include <dlfcn.h>     // dladdr
+#endif
 
 #include <csignal>
 #include <cstdio>
@@ -26,13 +35,11 @@
 #include <system_error>
 #include <filesystem>
 
-#pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "dbghelp.lib")
-
 namespace fs = std::filesystem;
 
 namespace {
 
+#ifdef _WIN32
 // RAII wrapper for Winsock init/cleanup.
 struct WinsockGuard {
     bool ok = false;
@@ -47,9 +54,16 @@ struct WinsockGuard {
         if (ok) WSACleanup();
     }
 };
+#else
+// Linux 不需要 Winsock 初始化。
+struct WinsockGuard {
+    bool ok = true;
+};
+#endif
 
 // Returns the directory containing the running executable (UTF-8).
 std::string getExeDirectory() {
+#ifdef _WIN32
     wchar_t path[MAX_PATH]{};
     DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
     if (len == 0 || len >= MAX_PATH) return ".";
@@ -66,6 +80,16 @@ std::string getExeDirectory() {
                         static_cast<int>(wpath.size()),
                         out.data(), n, nullptr, nullptr);
     return out;
+#else
+    char path[4096];
+    ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (len <= 0) return ".";
+    path[len] = '\0';
+    std::string spath(path);
+    size_t slash = spath.find_last_of('/');
+    if (slash != std::string::npos) spath.resize(slash);
+    return spath;
+#endif
 }
 
 std::string formatTimestamp() {
@@ -73,12 +97,17 @@ std::string formatTimestamp() {
     auto now = system_clock::now();
     std::time_t t = system_clock::to_time_t(now);
     std::tm tm{};
+#ifdef _WIN32
     localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
     char buf[64];
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
     return buf;
 }
 
+#ifdef _WIN32
 // Format a stack backtrace using StackWalk64 + SymFromAddr when symbols are
 // available. Returns a multi-line string. Best-effort: if dbghelp cannot
 // resolve a frame, the raw address is recorded.
@@ -152,9 +181,30 @@ std::string captureBacktrace(CONTEXT* ctx, HANDLE thread) {
     SymCleanup(proc);
     return out;
 }
+#else
+// Linux: 使用 execinfo.h 的 backtrace()/backtrace_symbols()。
+std::string captureBacktrace() {
+    void* buffer[32];
+    int n = backtrace(buffer, 32);
+    char** symbols = backtrace_symbols(buffer, n);
+    std::string out;
+    if (symbols) {
+        for (int i = 0; i < n; ++i) {
+            out += "  #";
+            out += std::to_string(i);
+            out += " ";
+            out += symbols[i];
+            out += "\n";
+        }
+        free(symbols);
+    }
+    return out;
+}
+#endif
 
 // Writes a crash report to today's log file. Kept minimal because the
 // process state may be corrupted at this point.
+#ifdef _WIN32
 void writeCrashReport(const char* title, DWORD code, void* address,
                       CONTEXT* ctx) {
     std::string report;
@@ -182,7 +232,30 @@ void writeCrashReport(const char* title, DWORD code, void* address,
     // Also emit to OutputDebugString so it shows up in a debugger.
     OutputDebugStringA(report.c_str());
 }
+#else
+void writeCrashReport(const char* title, int sig) {
+    std::string report;
+    report += "\n";
+    report += "========================================\n";
+    report += "!!! APPLICATION CRASH !!!\n";
+    report += "========================================\n";
+    char header[512];
+    std::snprintf(header, sizeof(header),
+                  "Time: %s\nTitle: %s\nSignal: %d\nPID: %d\n",
+                  formatTimestamp().c_str(), title, sig, getpid());
+    report += header;
+    report += "Backtrace:\n";
+    report += captureBacktrace();
+    report += "========================================\n";
 
+    zb::log::writeToCrashLog(zb::log::activeLogDir(), report);
+
+    // Linux: 输出到 stderr。
+    fputs(report.c_str(), stderr);
+}
+#endif
+
+#ifdef _WIN32
 LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
     if (ep) {
         writeCrashReport("Unhandled Exception",
@@ -195,8 +268,9 @@ LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
     // Let the default handler terminate so the OS error reporting still runs.
     return EXCEPTION_EXECUTE_HANDLER;
 }
+#endif
 
-void __cdecl signalHandler(int sig) {
+void signalHandler(int sig) {
     const char* name = "unknown";
     switch (sig) {
         case SIGABRT: name = "SIGABRT (abort)"; break;
@@ -206,10 +280,15 @@ void __cdecl signalHandler(int sig) {
         case SIGTERM: name = "SIGTERM (terminate)"; break;
         default: break;
     }
+#ifdef _WIN32
     writeCrashReport(name, static_cast<DWORD>(sig), nullptr, nullptr);
+#else
+    writeCrashReport(name, sig);
+#endif
     std::_Exit(1);
 }
 
+#ifdef _WIN32
 void __cdecl invalidParameterHandler(const wchar_t* /*expression*/,
                                      const wchar_t* /*function*/,
                                      const wchar_t* /*file*/,
@@ -223,24 +302,29 @@ void __cdecl pureCallHandler() {
     writeCrashReport("Pure Virtual Function Call", 0, nullptr, nullptr);
     std::_Exit(1);
 }
+#endif
 
 // Installs all crash handlers and enables file logging. Destruction restores
 // the previous handlers (mainly for cleanliness; in practice the process is
 // terminating anyway).
 struct CrashGuard {
+#ifdef _WIN32
     LPTOP_LEVEL_EXCEPTION_FILTER prevFilter_ = nullptr;
     _invalid_parameter_handler prevInvalid_ = nullptr;
     _purecall_handler prevPure_ = nullptr;
+#endif
 
     CrashGuard() {
+#ifdef _WIN32
         prevFilter_ = SetUnhandledExceptionFilter(unhandledExceptionFilter);
+        prevInvalid_ = _set_invalid_parameter_handler(invalidParameterHandler);
+        prevPure_ = _set_purecall_handler(pureCallHandler);
+#endif
         std::signal(SIGABRT, signalHandler);
         std::signal(SIGFPE, signalHandler);
         std::signal(SIGILL, signalHandler);
         std::signal(SIGSEGV, signalHandler);
         std::signal(SIGTERM, signalHandler);
-        prevInvalid_ = _set_invalid_parameter_handler(invalidParameterHandler);
-        prevPure_ = _set_purecall_handler(pureCallHandler);
         // Catch C++ uncaught exceptions as a last resort.
         std::set_terminate([]() {
             try {
@@ -254,12 +338,21 @@ struct CrashGuard {
                 zb::log::writeToCrashLog(zb::log::activeLogDir(),
                                          "Uncaught C++ exception (unknown type)\n");
             }
+#ifdef _WIN32
             writeCrashReport("Uncaught C++ Exception", 0, nullptr, nullptr);
+#else
+            writeCrashReport("Uncaught C++ Exception", 0);
+#endif
             std::_Exit(1);
         });
 
         // Enable file logging to <exe-dir>/log.
-        std::string logDir = getExeDirectory() + "\\log";
+        std::string logDir = getExeDirectory();
+#ifdef _WIN32
+        logDir += "\\log";
+#else
+        logDir += "/log";
+#endif
         zb::log::addFileSink(logDir);
     }
 
@@ -574,6 +667,7 @@ QString wordLightStyleSheet(const QString& arrowUri) {
 // 单实例锁：用命名互斥量确保同一台电脑只运行一个 ZeroBorders 进程。
 // 如果已有实例运行，尝试把已有窗口提到前台后退出。
 bool checkSingleInstance() {
+#ifdef _WIN32
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"ZeroBorders_SingleInstance_Mutex");
     if (hMutex == nullptr) return false;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -587,10 +681,16 @@ bool checkSingleInstance() {
         return false;
     }
     return true;
+#else
+    // Linux: 跳过单实例检查。可使用 flock 锁文件或 QLocalServer/QLocalSocket 实现。
+    return true;
+#endif
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+#endif
 
     // 单实例检查：仅 Release 模式启用。Debug 模式允许启动多个实例
     // 方便开发时同时运行两个程序测试双机通信。
@@ -618,7 +718,11 @@ int main(int argc, char* argv[]) {
     zb::MainWindow window;
     window.show();
 
+#ifdef _WIN32
     ZB_LOG_INFO("ZeroBorders started (PID={})", GetCurrentProcessId());
+#else
+    ZB_LOG_INFO("ZeroBorders started (PID={})", getpid());
+#endif
 
     int ret = QApplication::exec();
 

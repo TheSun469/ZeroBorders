@@ -13,7 +13,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_DEBUG_POSTFIX d)
 
 # Match the MSVC DLL runtime across all targets (required by shared third-party libs)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
 
 # All third-party sources/build intermediates live under build/ThirdParty (read-only source tree)
 set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/ThirdParty" CACHE PATH "Third-party base dir" FORCE)
@@ -39,7 +41,14 @@ endif()
 
 # Qt 6 (Widgets + Network) - GUI framework
 # Qt is installed locally (not fetched); point CMAKE_PREFIX_PATH at its CMake config.
-set(CMAKE_PREFIX_PATH "C:/Qt/Qt6.11.1/6.11.1/msvc2022_64" CACHE PATH "Qt6 prefix" FORCE)
+# Windows: C:/Qt/Qt6.11.1/6.11.1/msvc2022_64
+# Linux:   ~/Qt6.11.1/6.11.1/gcc_64
+if(WIN32)
+    set(QT_DEFAULT_PATH "C:/Qt/Qt6.11.1/6.11.1/msvc2022_64" CACHE PATH "Qt6 prefix")
+else()
+    set(QT_DEFAULT_PATH "$ENV{HOME}/Qt6.11.1/6.11.1/gcc_64" CACHE PATH "Qt6 prefix")
+endif()
+set(CMAKE_PREFIX_PATH ${QT_DEFAULT_PATH} CACHE PATH "Qt6 prefix" FORCE)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 # Run moc/rcc automatically on Q_OBJECT classes and .qrc files.
 set(CMAKE_AUTOMOC ON)
@@ -54,6 +63,14 @@ if(MSVC)
         WIN32_LEAN_AND_MEAN
         _WIN32_WINNT=0x0A00
     )
+endif()
+
+# Linux 平台依赖：X11 + XTest（输入捕获/注入）、OpenSSL（SHA-256）
+if(NOT WIN32)
+    find_package(X11 REQUIRED)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(XTST REQUIRED xtst)
+    pkg_check_modules(OPENSSL REQUIRED openssl)
 endif()
 
 add_subdirectory(src)

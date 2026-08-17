@@ -1,17 +1,17 @@
 #pragma once
 
 #include "../core/Types.h"
+#include "../core/Platform.h"
 #include <atomic>
 #include <functional>
 #include <string>
 #include <thread>
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
+// Platform.h defines SOCKET_ERROR_VALUE but not SOCKET_ERROR on Linux; provide
+// it here so the existing implementation can keep using the same macro.
+// On Windows SOCKET_ERROR comes from winsock2.h (via Platform.h).
+#ifndef SOCKET_ERROR
+#define SOCKET_ERROR (-1)
 #endif
 
 namespace zb {
@@ -52,7 +52,7 @@ private:
 
     std::atomic<bool> running_{false};
     std::thread thread_;
-    SOCKET sock_ = INVALID_SOCKET;
+    socket_t sock_ = INVALID_SOCKET;
 };
 
 } // namespace zb

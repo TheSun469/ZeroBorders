@@ -1,3 +1,4 @@
+# 平台无关源文件
 set(ZB_SOURCES
     main.cpp
     App.h
@@ -20,10 +21,6 @@ set(ZB_SOURCES
     network/NetworkClient.cpp
     input/IInputCapturer.h
     input/IInputInjector.h
-    input/WinInputCapturer.h
-    input/WinInputCapturer.cpp
-    input/WinInputInjector.h
-    input/WinInputInjector.cpp
     core/ScreenLayout.h
     router/ScreenRouter.h
     router/ScreenRouter.cpp
@@ -49,9 +46,26 @@ set(ZB_SOURCES
     gui/RemoteFileModel.cpp
     gui/RemoteDirTreeModel.h
     gui/RemoteDirTreeModel.cpp
-    ${CMAKE_SOURCE_DIR}/resources/app.rc
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )
+
+# 平台相关源文件
+if(WIN32)
+    list(APPEND ZB_SOURCES
+        input/WinInputCapturer.h
+        input/WinInputCapturer.cpp
+        input/WinInputInjector.h
+        input/WinInputInjector.cpp
+        ${CMAKE_SOURCE_DIR}/resources/app.rc
+    )
+else()
+    list(APPEND ZB_SOURCES
+        input/LinuxInputCapturer.h
+        input/LinuxInputCapturer.cpp
+        input/LinuxInputInjector.h
+        input/LinuxInputInjector.cpp
+    )
+endif()
 
 add_executable(ZeroBorders WIN32 ${ZB_SOURCES})
 
@@ -63,28 +77,48 @@ target_link_libraries(ZeroBorders PRIVATE
     nlohmann_json::nlohmann_json
     Qt6::Widgets
     Qt6::Network
-    ws2_32
-    bcrypt
-    iphlpapi
-    user32
-    gdi32
-    dbghelp
-    wtsapi32
 )
 
+if(WIN32)
+    target_link_libraries(ZeroBorders PRIVATE
+        ws2_32
+        bcrypt
+        iphlpapi
+        user32
+        gdi32
+        dbghelp
+        wtsapi32
+    )
+else()
+    target_link_libraries(ZeroBorders PRIVATE
+        ${X11_LIBRARIES}
+        ${XTST_LIBRARIES}
+        ${OPENSSL_LIBRARIES}
+    )
+    target_include_directories(ZeroBorders PRIVATE
+        ${X11_INCLUDE_DIRS}
+        ${XTST_INCLUDE_DIRS}
+        ${OPENSSL_INCLUDE_DIRS}
+    )
+endif()
+
 set_target_properties(ZeroBorders PROPERTIES
-    VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     AUTOMOC ON
     AUTORCC ON
     AUTOUIC ON
 )
 
-# Copy Qt runtime DLLs next to the executable so it runs from the build tree.
-add_custom_command(TARGET ZeroBorders POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ZeroBorders>"
-    COMMAND "${QT6_INSTALL_PREFIX}/bin/windeployqt"
-            --no-translations --no-system-d3d-compiler --no-opengl-sw
-            --no-quick-import --no-svg
-            "$<TARGET_FILE:ZeroBorders>"
-    VERBATIM
-)
+if(WIN32)
+    set_target_properties(ZeroBorders PROPERTIES
+        VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    )
+    # Copy Qt runtime DLLs next to the executable so it runs from the build tree.
+    add_custom_command(TARGET ZeroBorders POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ZeroBorders>"
+        COMMAND "${QT6_INSTALL_PREFIX}/bin/windeployqt"
+                --no-translations --no-system-d3d-compiler --no-opengl-sw
+                --no-quick-import --no-svg
+                "$<TARGET_FILE:ZeroBorders>"
+        VERBATIM
+    )
+endif()

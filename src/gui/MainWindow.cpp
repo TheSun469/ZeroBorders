@@ -42,11 +42,13 @@
 
 #include <filesystem>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 #include <wtsapi32.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -80,16 +82,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     roleLabel_->setText(QStringLiteral("角色：未连接"));
     ZB_LOG_INFO("ZeroBorders GUI ready");
 
+#ifdef _WIN32
     // Register for Windows session lock/unlock notifications so we can
     // suspend remote control while the secure desktop (lock screen) is
     // active — SendInput is ignored on the secure desktop, and without
     // handling this the cross-machine cursor gets stuck.
     WTSRegisterSessionNotification(reinterpret_cast<HWND>(winId()),
                                    NOTIFY_FOR_THIS_SESSION);
+#endif
 }
 
 MainWindow::~MainWindow() {
+#ifdef _WIN32
     WTSUnRegisterSessionNotification(reinterpret_cast<HWND>(winId()));
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +395,8 @@ void MainWindow::loadConfig() {
     QString localDir = QString::fromStdString(config_.receiveDir);
     if (localDir.isEmpty()) {
         localDir = QDir::toNativeSeparators(QDir::tempPath())
-                   + QStringLiteral("\\ZeroBorders");
+                   + QString(QDir::separator())
+                   + QStringLiteral("ZeroBorders");
     }
     localBrowser_->setPath(localDir);
     remoteBrowser_->setReadOnly(true);
@@ -690,7 +697,7 @@ void MainWindow::onNewFolder() {
 
     QString fullPath = dir;
     if (!fullPath.endsWith(QLatin1Char('\\')) && !fullPath.endsWith(QLatin1Char('/')))
-        fullPath += QLatin1Char('\\');
+        fullPath += QDir::separator();
     fullPath += name;
 
     QDir d;
@@ -713,7 +720,7 @@ void MainWindow::onNewFile() {
 
     QString fullPath = dir;
     if (!fullPath.endsWith(QLatin1Char('\\')) && !fullPath.endsWith(QLatin1Char('/')))
-        fullPath += QLatin1Char('\\');
+        fullPath += QDir::separator();
     fullPath += name;
 
     QFile f(fullPath);
@@ -775,7 +782,7 @@ void MainWindow::onRenameSelected() {
 
     QString newPath = fi.path();
     if (!newPath.endsWith(QLatin1Char('\\')) && !newPath.endsWith(QLatin1Char('/')))
-        newPath += QLatin1Char('\\');
+        newPath += QDir::separator();
     newPath += newName;
 
     QFile f(oldPath);
@@ -862,6 +869,7 @@ void MainWindow::appendLog(const QString& line, const QString& tag) {
 
 bool MainWindow::nativeEvent(const QByteArray& eventType, void* message,
                              qintptr* result) {
+#ifdef _WIN32
     MSG* msg = static_cast<MSG*>(message);
     if (msg->message == WM_WTSSESSION_CHANGE) {
         switch (msg->wParam) {
@@ -875,6 +883,7 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message,
                 break;
         }
     }
+#endif
     return QMainWindow::nativeEvent(eventType, message, result);
 }
 
@@ -948,7 +957,9 @@ void MainWindow::onRemoteLayoutChanged(ScreenLayout layout) {
 
 void MainWindow::onRemoteReceiveDirChanged(const QString& dir) {
     if (dir.isEmpty()) {
-        remoteBrowser_->setPath(QStringLiteral("%TEMP%\\ZeroBorders（对端默认）"));
+        remoteBrowser_->setPath(QDir::toNativeSeparators(QDir::tempPath())
+                                + QString(QDir::separator())
+                                + QStringLiteral("ZeroBorders（对端默认）"));
     } else {
         remoteBrowser_->setPath(dir);
     }

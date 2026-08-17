@@ -1,9 +1,11 @@
 #include "Log.h"
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 
 #include <chrono>
 #include <cstring>
@@ -31,6 +33,7 @@ std::string& logDirStorage() {
     return dir;
 }
 
+#ifdef _WIN32
 std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return {};
     int len = MultiByteToWideChar(CP_UTF8, 0, s.data(),
@@ -40,6 +43,7 @@ std::wstring utf8ToWide(const std::string& s) {
                         out.data(), len);
     return out;
 }
+#endif
 
 fs::path pathFromUtf8(const std::string& utf8) {
 #ifdef _WIN32

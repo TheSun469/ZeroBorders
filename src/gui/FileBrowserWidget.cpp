@@ -22,10 +22,12 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 
 #include <filesystem>
 
@@ -54,6 +56,9 @@ public:
 };
 
 // On Windows, std::filesystem treats narrow strings as ANSI; convert UTF-8.
+// On Linux/macOS, std::filesystem::path accepts UTF-8 std::string directly,
+// so no conversion is needed.
+#ifdef _WIN32
 std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return {};
     int len = MultiByteToWideChar(CP_UTF8, 0, s.data(),
@@ -63,6 +68,7 @@ std::wstring utf8ToWide(const std::string& s) {
                         out.data(), len);
     return out;
 }
+#endif
 
 } // namespace
 
@@ -291,11 +297,12 @@ QStringList FileBrowserWidget::selectedFullPaths() const {
         const auto names = selectedPaths();
         for (const QString& name : names) {
             if (dir.isEmpty()) {
-                result << name;  // 根目录下条目（如 "C:\\"）本身就是完整路径
+                result << name;  // 根目录下条目（如 "C:\\" 或 "/"）本身就是完整路径
             } else {
                 QString full = dir;
+                const QChar sep = QDir::separator();
                 if (!full.endsWith(QLatin1Char('\\')) && !full.endsWith(QLatin1Char('/')))
-                    full += QLatin1Char('\\');
+                    full += sep;
                 full += name;
                 result << full;
             }
@@ -309,7 +316,11 @@ void FileBrowserWidget::navigateLocal(const QString& dir) {
 
     // Verify directory exists (handle UTF-8 paths correctly).
     std::error_code ec;
+#ifdef _WIN32
     fs::path fp(utf8ToWide(dir.toStdString()));
+#else
+    fs::path fp(dir.toStdString());
+#endif
     if (!fs::is_directory(fp, ec)) {
         ZB_LOG_WARN("Local path not a directory: {}", dir.toStdString());
         return;
@@ -384,14 +395,16 @@ void FileBrowserWidget::onDoubleClicked(const QModelIndex& index) {
         const auto* e = remoteModel_->entryAt(index.row());
         if (!e) return;
         if (e->isDirectory) {
-            // At root level, drive names like "C:\" are already full paths.
+            // At root level, drive names like "C:\" (Windows) or root "/" (Unix)
+            // are already full paths.
             if (currentPath_.isEmpty()) {
                 navigateRemote(e->name);
             } else {
-                // Use backslash on Windows for consistent path display.
+                // Use native separator for consistent path display.
                 QString child = currentPath_;
-                if (!child.endsWith(QLatin1Char('\\')))
-                    child += QLatin1Char('\\');
+                const QChar sep = QDir::separator();
+                if (!child.endsWith(sep))
+                    child += sep;
                 child += e->name;
                 navigateRemote(child);
             }

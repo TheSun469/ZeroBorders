@@ -1,16 +1,23 @@
 #include "Hash.h"
 
+#include <stdexcept>
+
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
-#include <stdexcept>
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(s) (((NTSTATUS)(s)) >= 0)
+#endif
+#else
+#include <openssl/sha.h>
 #endif
 
 namespace zb {
 
 TokenHash sha256(std::string_view s) {
+    TokenHash out{};
+#ifdef _WIN32
     BCRYPT_ALG_HANDLE hAlg = nullptr;
     NTSTATUS st = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
     if (!NT_SUCCESS(st)) {
@@ -33,7 +40,6 @@ TokenHash sha256(std::string_view s) {
         throw std::runtime_error("BCryptHashData failed");
     }
 
-    TokenHash out{};
     st = BCryptFinishHash(hHash, out.data(), static_cast<ULONG>(out.size()), 0);
 
     BCryptDestroyHash(hHash);
@@ -42,6 +48,11 @@ TokenHash sha256(std::string_view s) {
     if (!NT_SUCCESS(st)) {
         throw std::runtime_error("BCryptFinishHash failed");
     }
+#else
+    SHA256(reinterpret_cast<const unsigned char*>(s.data()),
+           s.size(),
+           reinterpret_cast<unsigned char*>(out.data()));
+#endif
     return out;
 }
 

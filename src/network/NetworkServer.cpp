@@ -1,7 +1,21 @@
 #include "NetworkServer.h"
 #include "../core/Log.h"
 
-#include <windows.h>
+// Platform.h (pulled in via NetworkServer.h -> TcpTransport.h) provides
+// winsock2.h/ws2tcpip.h on Windows and the POSIX socket headers +
+// closesocket/WSAGetLastError/errno mappings on Linux. Here we only add the
+// platform-specific extras. GetSystemMetrics is replaced by Qt's
+// QGuiApplication::primaryScreen() so <windows.h> is no longer needed.
+#ifdef _WIN32
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/select.h>  // select() on Linux requires this header
+#include <fcntl.h>        // fcntl, O_NONBLOCK
+#endif
+
+#include <QGuiApplication>
+#include <QScreen>
+
 #include <chrono>
 
 namespace zb {
@@ -15,8 +29,8 @@ NetworkServer::~NetworkServer() {
     stop();
 }
 
-SOCKET NetworkServer::createListener(uint16_t port) {
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+socket_t NetworkServer::createListener(uint16_t port) {
+    socket_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return INVALID_SOCKET;
 
     BOOL reuse = TRUE;
@@ -37,8 +51,15 @@ SOCKET NetworkServer::createListener(uint16_t port) {
         return INVALID_SOCKET;
     }
 
+    // Set the listening socket to non-blocking so accept loops can poll with
+    // select() and a timeout.
+#ifdef _WIN32
     u_long nonBlock = 1;
     ioctlsocket(s, FIONBIO, &nonBlock);
+#else
+    int flags = ::fcntl(s, F_GETFL, 0);
+    ::fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
     return s;
 }
 
@@ -108,12 +129,14 @@ void NetworkServer::acceptControlLoop() {
         timeval tv{};
         tv.tv_sec = 0;
         tv.tv_usec = 500000;
-        int rc = select(0, &readSet, nullptr, nullptr, &tv);
+        // select()'s first argument is ignored on Windows but must be the
+        // highest fd + 1 on Linux. Passing fd+1 works on both platforms.
+        int rc = select(static_cast<int>(ctrlListener_) + 1, &readSet, nullptr, nullptr, &tv);
         if (rc <= 0) continue;
 
         sockaddr_in client{};
-        int len = sizeof(client);
-        SOCKET clientSock = accept(ctrlListener_, reinterpret_cast<sockaddr*>(&client), &len);
+        socklen_t len = sizeof(client);
+        socket_t clientSock = accept(ctrlListener_, reinterpret_cast<sockaddr*>(&client), &len);
         if (clientSock == INVALID_SOCKET) continue;
 
         char ip[INET_ADDRSTRLEN]{};
@@ -147,12 +170,14 @@ void NetworkServer::acceptDataLoop() {
         timeval tv{};
         tv.tv_sec = 0;
         tv.tv_usec = 500000;
-        int rc = select(0, &readSet, nullptr, nullptr, &tv);
+        // select()'s first argument is ignored on Windows but must be the
+        // highest fd + 1 on Linux. Passing fd+1 works on both platforms.
+        int rc = select(static_cast<int>(dataListener_) + 1, &readSet, nullptr, nullptr, &tv);
         if (rc <= 0) continue;
 
         sockaddr_in client{};
-        int len = sizeof(client);
-        SOCKET clientSock = accept(dataListener_, reinterpret_cast<sockaddr*>(&client), &len);
+        socklen_t len = sizeof(client);
+        socket_t clientSock = accept(dataListener_, reinterpret_cast<sockaddr*>(&client), &len);
         if (clientSock == INVALID_SOCKET) continue;
 
         char ip[INET_ADDRSTRLEN]{};
@@ -202,8 +227,12 @@ void NetworkServer::handleControl(MsgType t, const std::vector<uint8_t>& p) {
 
         WelcomeMsg wb{};
         wb.result = 0;
-        wb.screenWidth = static_cast<uint32_t>(GetSystemMetrics(SM_CXSCREEN));
-        wb.screenHeight = static_cast<uint32_t>(GetSystemMetrics(SM_CYSCREEN));
+        // Use Qt to obtain the primary screen size instead of the Windows-only
+        // GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN).
+        QScreen* screen = QGuiApplication::primaryScreen();
+        QSize screenSize = screen ? screen->size() : QSize(0, 0);
+        wb.screenWidth = static_cast<uint32_t>(screenSize.width());
+        wb.screenHeight = static_cast<uint32_t>(screenSize.height());
         wb.capabilities = kCurrentCapabilities;
         ctrl_->send(MsgType::Welcome, serializeWelcome(wb));
         ctrlState_ = CtrlState::Ready;

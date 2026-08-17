@@ -8,10 +8,12 @@
 #include <fstream>
 #include <system_error>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -25,9 +27,21 @@ ConfigManager& ConfigManager::instance() {
 }
 
 std::string ConfigManager::configDir() const {
+    std::string dir;
+#ifdef _WIN32
     const char* appdata = std::getenv("APPDATA");
-    std::string dir = appdata ? std::string(appdata) + "\\ZeroBorders"
-                              : ".\\ZeroBorders";
+    dir = appdata ? std::string(appdata) + "\\ZeroBorders"
+                  : ".\\ZeroBorders";
+#else
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    if (xdg) {
+        dir = std::string(xdg) + "/ZeroBorders";
+    } else {
+        const char* home = std::getenv("HOME");
+        dir = home ? std::string(home) + "/.config/ZeroBorders"
+                   : "./ZeroBorders";
+    }
+#endif
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) {
@@ -37,7 +51,11 @@ std::string ConfigManager::configDir() const {
 }
 
 std::string ConfigManager::configPath() const {
+#ifdef _WIN32
     return configDir() + "\\config.json";
+#else
+    return configDir() + "/config.json";
+#endif
 }
 
 bool ConfigManager::load(AppConfig& out) const {

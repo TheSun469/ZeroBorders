@@ -1,10 +1,12 @@
 #include "FileTransferManager.h"
 #include "../core/Log.h"
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 
 #include <atomic>
 #include <cstdlib>
@@ -19,6 +21,7 @@ namespace zb {
 
 namespace {
 
+#ifdef _WIN32
 // On Windows, std::filesystem::path and std::ifstream treat narrow
 // std::string paths as the system ANSI code page, not UTF-8. All paths
 // flowing through this class are UTF-8 (from the clipboard / network),
@@ -43,6 +46,7 @@ std::string wideToUtf8(const std::wstring& w) {
                         out.data(), len, nullptr, nullptr);
     return out;
 }
+#endif
 
 // Construct a fs::path from a UTF-8 narrow string (correct on Windows).
 fs::path pathFromUtf8(const std::string& utf8) {
@@ -460,7 +464,7 @@ void FileTransferManager::handleMessage(MsgType type, const std::vector<uint8_t>
                     }
 #else
                     const char* temp = std::getenv("TEMP");
-                    const char* home = std::getenv("USERPROFILE");
+                    const char* home = std::getenv("HOME");
                     if (temp) {
                         destDir = std::string(temp) + "/ZeroBorders";
                         fs::create_directories(destDir, ec);
@@ -475,7 +479,11 @@ void FileTransferManager::handleMessage(MsgType type, const std::vector<uint8_t>
 #endif
                     if (ec || destDir.empty()) {
                         ec.clear();
+#ifdef _WIN32
                         destDir = ".\\ZeroBorders_Received";
+#else
+                        destDir = "./ZeroBorders_Received";
+#endif
                         fs::create_directories(pathFromUtf8(destDir), ec);
                     }
                 }
@@ -715,6 +723,11 @@ void FileTransferManager::senderThread(uint64_t transferId,
 
         std::vector<uint8_t> buf(kChunkSize);
 
+        // 令牌桶限速：记录传输起始时间，根据已发送字节数计算理论耗时，
+        // 如果实际耗时不足则睡眠补齐，确保文件传输不超过 kMaxTransferBps。
+        // 这样键鼠控制通道始终有充足带宽，鼠标操作不会被文件传输挤占。
+        const auto transferStart = std::chrono::steady_clock::now();
+
         for (uint32_t entryIdx = 0; entryIdx < entries.size(); ++entryIdx) {
             const auto& e = entries[entryIdx];
             if (e.isDirectory) continue;
@@ -795,6 +808,20 @@ void FileTransferManager::senderThread(uint64_t transferId,
 
                 offset += bytesRead;
                 totalSent += bytesRead;
+
+                // 限速：计算按 kMaxTransferBps 速率发送 totalSent 字节
+                // 应当消耗的时间，如果实际用时少于该值则睡眠补齐。
+                {
+                    auto elapsed = std::chrono::steady_clock::now() - transferStart;
+                    auto expectedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::nanoseconds(
+                            static_cast<int64_t>(totalSent) * 1'000'000'000LL /
+                            static_cast<int64_t>(kMaxTransferBps)));
+                    if (expectedMs > elapsed) {
+                        auto sleepMs = expectedMs - elapsed;
+                        std::this_thread::sleep_for(sleepMs);
+                    }
+                }
 
                 if (progressCb_) {
                     progressCb_(transferId, totalSent, totalSize);

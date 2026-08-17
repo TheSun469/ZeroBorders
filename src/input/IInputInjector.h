@@ -8,6 +8,8 @@ class IInputInjector {
 public:
     virtual ~IInputInjector() = default;
     virtual bool inject(const InputEvent& ev) = 0;
+    // 直接移动光标到绝对坐标（用于 CursorEnter 时 warp 到入口位置）。
+    virtual bool injectMouseMove(int32_t x, int32_t y) = 0;
     // 释放所有可能卡住的修饰键（Ctrl/Shift/Alt/Win）。
     // 跨屏切换控制权时调用，防止修饰键状态在对端残留。
     virtual void releaseAllKeys() = 0;

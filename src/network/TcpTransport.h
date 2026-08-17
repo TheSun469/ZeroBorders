@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/Protocol.h"
+#include "../core/Platform.h"
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -9,12 +10,18 @@
 #include <vector>
 
 #ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+#else
+// SD_BOTH is Windows-only (winsock2.h); map it to the POSIX equivalent.
+// SHUT_RDWR is brought in by <sys/socket.h> via Platform.h.
+#ifndef SD_BOTH
+#define SD_BOTH SHUT_RDWR
+#endif
+// Platform.h defines SOCKET_ERROR_VALUE but not SOCKET_ERROR on Linux; provide
+// it here so the existing implementation can keep using the same macro.
+#ifndef SOCKET_ERROR
+#define SOCKET_ERROR (-1)
+#endif
 #endif
 
 namespace zb {
@@ -37,7 +44,7 @@ public:
 
     bool connect(const std::string& host, uint16_t port, int timeoutMs = 5000);
     // Adopt an already-accepted socket (server side).
-    void adopt(SOCKET s);
+    void adopt(socket_t s);
     void start();
 
     bool send(MsgType type, const std::vector<uint8_t>& payload);
@@ -56,7 +63,7 @@ private:
     void fireDisconnect();
 
     Channel channel_;
-    SOCKET sock_ = INVALID_SOCKET;
+    socket_t sock_ = INVALID_SOCKET;
     std::atomic<bool> connected_{false};
     std::atomic<bool> closing_{false};
     std::atomic<bool> disconnectFired_{false};

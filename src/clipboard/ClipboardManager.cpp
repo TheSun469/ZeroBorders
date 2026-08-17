@@ -1,6 +1,13 @@
 #include "ClipboardManager.h"
 #include "../core/Log.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <string_view>
+#include <thread>
+
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -22,12 +29,6 @@ typedef struct _DROPFILES {
 #ifndef CF_DIBV5
 #define CF_DIBV5 17
 #endif
-
-#include <atomic>
-#include <chrono>
-#include <cstring>
-#include <string_view>
-#include <thread>
 
 #pragma comment(lib, "user32.lib")
 
@@ -540,3 +541,254 @@ void ClipboardManager::recordWrite(const TokenHash& digest) {
 }
 
 } // namespace zb
+
+#else // !_WIN32 — Linux implementation based on QClipboard
+
+#include <QBuffer>
+
+namespace zb {
+
+ClipboardManager::ClipboardManager() = default;
+
+ClipboardManager::~ClipboardManager() {
+    stop();
+}
+
+bool ClipboardManager::start(ChangeCallback cb) {
+    if (running_.load()) return false;
+    callback_ = std::move(cb);
+    running_ = true;
+
+    // QClipboard must be accessed from the main (GUI) thread.
+    QMetaObject::invokeMethod(qApp, [this] {
+        clipboard_ = QGuiApplication::clipboard();
+        QObject::connect(clipboard_, &QClipboard::dataChanged,
+                         qApp, [this] { onClipboardChanged(); });
+    });
+    return true;
+}
+
+void ClipboardManager::stop() {
+    if (!running_.exchange(false)) return;
+    // Disconnect on the GUI thread because QClipboard is not thread-safe.
+    QMetaObject::invokeMethod(qApp, [this] {
+        if (clipboard_) {
+            QObject::disconnect(clipboard_, &QClipboard::dataChanged, qApp, nullptr);
+            clipboard_ = nullptr;
+        }
+    });
+    ZB_LOG_INFO("Clipboard listener stopped");
+}
+
+void ClipboardManager::onClipboardChanged() {
+    if (!clipboard_) return;
+
+    ClipboardContent content;
+    if (!readLocal(content)) return;
+
+    if (isEcho(content.digest)) {
+        ZB_LOG_DEBUG("Clipboard change ignored (echo of our own write)");
+        return;
+    }
+    if (content.digest == lastSentDigest_) {
+        ZB_LOG_DEBUG("Clipboard change ignored (duplicate of last sent)");
+        return;
+    }
+
+    const char* fmtName = "unknown";
+    switch (content.format) {
+        case ClipboardFormat::Text:  fmtName = "text"; break;
+        case ClipboardFormat::Image: fmtName = "image"; break;
+        case ClipboardFormat::Files: fmtName = "files"; break;
+        default: break;
+    }
+    ZB_LOG_INFO("Local clipboard changed: format={}, digest={:.8}",
+                fmtName, tokenToHex(content.digest));
+    lastSentDigest_ = content.digest;
+
+    if (callback_) {
+        try {
+            callback_(content);
+        } catch (const std::exception& e) {
+            ZB_LOG_ERROR("Clipboard change callback exception: {}", e.what());
+        } catch (...) {
+            ZB_LOG_ERROR("Clipboard change callback unknown exception");
+        }
+    }
+}
+
+void ClipboardManager::syncNow() {
+    if (!running_.load() || !callback_) return;
+    // readLocal touches QClipboard, so it must run on the GUI thread.
+    QMetaObject::invokeMethod(qApp, [this] {
+        if (!clipboard_) return;
+        ClipboardContent content;
+        if (!readLocal(content)) return;
+        if (isEcho(content.digest)) return;
+        if (content.digest == lastSentDigest_) return;
+        ZB_LOG_INFO("Initial clipboard sync on connect");
+        lastSentDigest_ = content.digest;
+        try {
+            callback_(content);
+        } catch (const std::exception& e) {
+            ZB_LOG_ERROR("Clipboard sync callback exception: {}", e.what());
+        } catch (...) {
+            ZB_LOG_ERROR("Clipboard sync callback unknown exception");
+        }
+    });
+}
+
+bool ClipboardManager::readLocal(ClipboardContent& out) {
+    if (!clipboard_) return false;
+    const QMimeData* md = clipboard_->mimeData();
+    if (!md) return false;
+
+    // Check file URLs first (same priority as Windows CF_HDROP). When files
+    // are copied, the clipboard may also contain text with the paths; we want
+    // to trigger a real file transfer, not send plain text.
+    if (md->hasUrls()) {
+        QList<QUrl> urls = md->urls();
+        std::vector<std::string> paths;
+        for (const auto& url : urls) {
+            if (url.isLocalFile()) {
+                paths.push_back(url.toLocalFile().toStdString());
+            }
+        }
+        if (!paths.empty()) {
+            out.format = ClipboardFormat::Files;
+            out.filePaths = std::move(paths);
+            std::string concat;
+            for (const auto& p : out.filePaths) concat += p + ";";
+            out.digest = sha256(concat);
+            return true;
+        }
+    }
+
+    // Check image.
+    if (md->hasImage()) {
+        QImage img = clipboard_->image();
+        if (!img.isNull()) {
+            // Convert to PNG for cross-platform transport.
+            QByteArray ba;
+            QBuffer buffer(&ba);
+            buffer.open(QIODevice::WriteOnly);
+            img.save(&buffer, "PNG");
+            out.format = ClipboardFormat::Image;
+            out.imageWidth = img.width();
+            out.imageHeight = img.height();
+            out.pngData.assign(ba.constBegin(), ba.constEnd());
+            out.digest = sha256(std::string_view(
+                reinterpret_cast<const char*>(out.pngData.data()),
+                out.pngData.size()));
+            return true;
+        }
+    }
+
+    // Check text last.
+    if (md->hasText()) {
+        QString text = clipboard_->text();
+        if (!text.isEmpty()) {
+            out.format = ClipboardFormat::Text;
+            out.text = text.toStdString();
+            out.digest = sha256(out.text);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ClipboardManager::setRemoteText(const std::string& utf8) {
+    TokenHash digest = sha256(utf8);
+    // Record the digest BEFORE the write so the dataChanged echo is suppressed.
+    recordWrite(digest);
+    lastSentDigest_ = digest;
+
+    QMetaObject::invokeMethod(qApp, [this, utf8] {
+        if (clipboard_) {
+            clipboard_->setText(QString::fromStdString(utf8));
+        }
+    });
+    ZB_LOG_INFO("Remote text set to clipboard ({} chars)", utf8.size());
+    return true;
+}
+
+bool ClipboardManager::setRemoteImage(const std::vector<uint8_t>& dibData, int w, int h) {
+    if (dibData.empty()) return false;
+
+    // Load the image on the calling thread — QImage is reentrant, so this is
+    // safe from any thread (unlike QClipboard which must be main-thread only).
+    QImage img;
+    if (!img.loadFromData(dibData.data(), static_cast<int>(dibData.size()), "PNG")) {
+        img.loadFromData(dibData.data(), static_cast<int>(dibData.size()));
+    }
+    if (img.isNull()) {
+        ZB_LOG_WARN("Failed to load remote image data ({} bytes)", dibData.size());
+        return false;
+    }
+
+    // Re-encode to PNG so the digest matches what readLocal would compute when
+    // the dataChanged echo fires. This is critical for echo prevention.
+    QByteArray pngBytes;
+    {
+        QBuffer buffer(&pngBytes);
+        buffer.open(QIODevice::WriteOnly);
+        img.save(&buffer, "PNG");
+    }
+    TokenHash digest = sha256(std::string_view(
+        reinterpret_cast<const char*>(pngBytes.constData()),
+        static_cast<size_t>(pngBytes.size())));
+    recordWrite(digest);
+    lastSentDigest_ = digest;
+
+    // Only the clipboard write needs to happen on the main thread.
+    QMetaObject::invokeMethod(qApp, [this, img] {
+        if (clipboard_) {
+            clipboard_->setImage(img);
+        }
+    });
+    ZB_LOG_INFO("Remote image set to clipboard ({}x{}, {} bytes)", w, h, dibData.size());
+    return true;
+}
+
+bool ClipboardManager::setRemoteFiles(const std::vector<std::string>& paths) {
+    if (paths.empty()) return false;
+
+    std::string concat;
+    for (const auto& p : paths) concat += p + ";";
+    TokenHash digest = sha256(concat);
+    recordWrite(digest);
+    lastSentDigest_ = digest;
+
+    QMetaObject::invokeMethod(qApp, [this, paths] {
+        if (!clipboard_) return;
+        QMimeData* md = new QMimeData;
+        QList<QUrl> urls;
+        for (const auto& p : paths) {
+            urls.append(QUrl::fromLocalFile(QString::fromStdString(p)));
+        }
+        md->setUrls(urls);
+        // setMimeData takes ownership of md.
+        clipboard_->setMimeData(md);
+    });
+    ZB_LOG_INFO("Remote files set to clipboard ({} files)", paths.size());
+    return true;
+}
+
+bool ClipboardManager::isEcho(const TokenHash& digest) const {
+    size_t count = echoCacheFull_ ? kEchoCacheSize : echoCacheIdx_;
+    for (size_t i = 0; i < count; ++i) {
+        if (echoCache_[i] == digest) return true;
+    }
+    return false;
+}
+
+void ClipboardManager::recordWrite(const TokenHash& digest) {
+    echoCache_[echoCacheIdx_] = digest;
+    echoCacheIdx_ = (echoCacheIdx_ + 1) % kEchoCacheSize;
+    if (echoCacheIdx_ == 0) echoCacheFull_ = true;
+}
+
+} // namespace zb
+
+#endif // _WIN32

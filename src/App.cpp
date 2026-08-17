@@ -3,8 +3,13 @@
 #include "core/Hash.h"
 #include "core/Log.h"
 #include "core/Protocol.h"
+#ifdef _WIN32
 #include "input/WinInputCapturer.h"
 #include "input/WinInputInjector.h"
+#else
+#include "input/LinuxInputCapturer.h"
+#include "input/LinuxInputInjector.h"
+#endif
 #include "network/NetworkClient.h"
 #include "network/NetworkServer.h"
 #include "router/ScreenRouter.h"
@@ -19,10 +24,49 @@
 #include <QTimer>
 #include <QVariantMap>
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#else
+// Linux 等效头文件：
+//   <strings.h>  提供 strcasecmp（替代 _wcsicmp）
+//   <unistd.h>   提供 gethostname（替代 GetComputerNameA）
+//   QGuiApplication/QScreen 提供屏幕尺寸（替代 GetSystemMetrics）
+#  include <strings.h>
+#  include <unistd.h>
+#  include <QGuiApplication>
+#  include <QScreen>
+
+// Windows Virtual Key codes — 在 InputEvent 协议中用作跨平台按键标识。
+// Linux 注入器（LinuxInputInjector::vkToX11KeyCode）内部维护 vkCode→X11
+// keysym 映射表，所以这些常量在 Linux 下也必须可见。
+#  ifndef VK_LSHIFT
+#    define VK_LSHIFT    0xA0
+#  endif
+#  ifndef VK_RSHIFT
+#    define VK_RSHIFT    0xA1
+#  endif
+#  ifndef VK_LCONTROL
+#    define VK_LCONTROL  0xA2
+#  endif
+#  ifndef VK_RCONTROL
+#    define VK_RCONTROL  0xA3
+#  endif
+#  ifndef VK_LMENU
+#    define VK_LMENU     0xA4
+#  endif
+#  ifndef VK_RMENU
+#    define VK_RMENU     0xA5
+#  endif
+#  ifndef VK_LWIN
+#    define VK_LWIN      0x5B
+#  endif
+#  ifndef VK_RWIN
+#    define VK_RWIN      0x5C
+#  endif
 #endif
-#include <windows.h>
 
 namespace fs = std::filesystem;
 
@@ -30,7 +74,10 @@ namespace zb {
 
 namespace {
 
+#ifdef _WIN32
 // UTF-8 ↔ UTF-16 conversion helpers (Windows paths are UTF-16).
+// Linux 不需要这两个函数：std::filesystem::path 直接接受 UTF-8，
+// 调用方在 Linux 分支里直接使用 std::string 路径。
 std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return {};
     int len = MultiByteToWideChar(CP_UTF8, 0, s.data(),
@@ -51,6 +98,7 @@ std::string wideToUtf8(const std::wstring& w) {
                         out.data(), len, nullptr, nullptr);
     return out;
 }
+#endif // _WIN32
 
 } // namespace
 
@@ -261,7 +309,8 @@ std::vector<DirEntry> App::scanLocalDirectory(const std::string& dirUtf8, bool& 
     std::vector<DirEntry> result;
     ok = false;
 
-    // Convert UTF-8 → UTF-16 for Windows filesystem APIs.
+#ifdef _WIN32
+    // Windows: filesystem APIs expect UTF-16. Convert UTF-8 → UTF-16.
     int wlen = MultiByteToWideChar(CP_UTF8, 0, dirUtf8.c_str(),
                                    static_cast<int>(dirUtf8.size()),
                                    nullptr, 0);
@@ -270,9 +319,14 @@ std::vector<DirEntry> App::scanLocalDirectory(const std::string& dirUtf8, bool& 
     MultiByteToWideChar(CP_UTF8, 0, dirUtf8.c_str(),
                         static_cast<int>(dirUtf8.size()),
                         wpath.data(), wlen);
+    fs::path basePath(wpath);
+#else
+    // Linux: std::filesystem::path 接受 UTF-8，无需转换。
+    fs::path basePath(dirUtf8);
+#endif
 
     std::error_code ec;
-    auto it = fs::directory_iterator(wpath, ec);
+    auto it = fs::directory_iterator(basePath, ec);
     if (ec) {
         ZB_LOG_WARN("scanLocalDirectory open [{}] failed: {}",
                     dirUtf8, ec.message());
@@ -281,7 +335,11 @@ std::vector<DirEntry> App::scanLocalDirectory(const std::string& dirUtf8, bool& 
 
     for (const auto& entry : it) {
         DirEntry de;
+#ifdef _WIN32
         de.name = wideToUtf8(entry.path().filename().wstring());
+#else
+        de.name = entry.path().filename().string();
+#endif
         if (de.name.empty()) continue;
         std::error_code ecStat;
         de.isDirectory = entry.is_directory(ecStat);
@@ -304,8 +362,12 @@ std::vector<DirEntry> App::scanLocalDirectory(const std::string& dirUtf8, bool& 
     std::sort(result.begin(), result.end(),
               [](const DirEntry& a, const DirEntry& b) {
                   if (a.isDirectory != b.isDirectory) return a.isDirectory;
+#ifdef _WIN32
                   return _wcsicmp(utf8ToWide(a.name).c_str(),
                                   utf8ToWide(b.name).c_str()) < 0;
+#else
+                  return strcasecmp(a.name.c_str(), b.name.c_str()) < 0;
+#endif
               });
 
     ok = true;
@@ -322,10 +384,11 @@ void App::handleListDirRequest(const std::vector<uint8_t>& payload) {
     // Empty path means "root" — list all available drives on Windows.
     std::string target = req.path;
     if (target.empty()) {
+        std::vector<DirEntry> entries;
+#ifdef _WIN32
         // Enumerate all logical drives.
         wchar_t drives[256];
         DWORD len = GetLogicalDriveStringsW(256, drives);
-        std::vector<DirEntry> entries;
         if (len > 0 && len < 256) {
             const wchar_t* p = drives;
             while (*p) {
@@ -339,6 +402,15 @@ void App::handleListDirRequest(const std::vector<uint8_t>& payload) {
                 p += ws.size() + 1;
             }
         }
+#else
+        // Linux 根目录只有一个 "/"。
+        DirEntry de;
+        de.name = "/";
+        de.isDirectory = true;
+        de.size = 0;
+        de.mtime = 0;
+        entries.push_back(std::move(de));
+#endif
         resp.path = "";
         resp.entries = std::move(entries);
         resp.result = 0;
@@ -424,6 +496,10 @@ void App::handleFilePullRequest(const std::vector<uint8_t>& payload) {
     std::vector<std::string> validPaths;
     validPaths.reserve(req.paths.size());
     for (const auto& p : req.paths) {
+        std::error_code ec;
+        bool exists;
+#ifdef _WIN32
+        // Windows: filesystem APIs expect UTF-16. Convert UTF-8 → UTF-16.
         std::wstring wp;
         int wlen = MultiByteToWideChar(CP_UTF8, 0, p.c_str(),
                                        static_cast<int>(p.size()), nullptr, 0);
@@ -432,8 +508,12 @@ void App::handleFilePullRequest(const std::vector<uint8_t>& payload) {
             MultiByteToWideChar(CP_UTF8, 0, p.c_str(),
                                 static_cast<int>(p.size()), wp.data(), wlen);
         }
-        std::error_code ec;
-        if (fs::exists(wp, ec)) {
+        exists = fs::exists(wp, ec);
+#else
+        // Linux: std::filesystem::path 接受 UTF-8，直接使用。
+        exists = fs::exists(p, ec);
+#endif
+        if (exists) {
             validPaths.push_back(p);
         } else {
             ZB_LOG_WARN("Pull request path not found: {}", p);
@@ -469,19 +549,40 @@ void App::launchServer(const AppConfig& cfg, bool enableDiscovery) {
     std::string name = cfg.serverName;
     if (name.empty()) {
         char hostname[256]{};
+#ifdef _WIN32
         DWORD size = sizeof(hostname);
         if (GetComputerNameA(hostname, &size)) name = hostname;
         else name = "ZeroBorders-Server";
+#else
+        // Linux: gethostname 返回以 NUL 结尾的主机名。
+        if (gethostname(hostname, sizeof(hostname) - 1) == 0) name = hostname;
+        else name = "ZeroBorders-Server";
+#endif
     }
 
+#ifdef _WIN32
     localW_ = static_cast<uint32_t>(GetSystemMetrics(SM_CXSCREEN));
     localH_ = static_cast<uint32_t>(GetSystemMetrics(SM_CYSCREEN));
+#else
+    // Linux: 通过 Qt 查询主屏幕几何尺寸（等价于 GetSystemMetrics(SM_CXSCREEN/CYSCREEN)）。
+    if (auto* screen = QGuiApplication::primaryScreen()) {
+        auto sz = screen->size();
+        localW_ = static_cast<uint32_t>(sz.width());
+        localH_ = static_cast<uint32_t>(sz.height());
+    }
+#endif
 
     TokenHash token = sha256(cfg.pairingCode + "|" + cfg.username);
 
     server_ = std::make_unique<NetworkServer>(token, name,
         cfg.controlPort, cfg.dataPort, cfg.udpPort);
-    capturer_ = std::make_unique<WinInputCapturer>();
+    capturer_ = std::make_unique<
+#ifdef _WIN32
+        WinInputCapturer
+#else
+        LinuxInputCapturer
+#endif
+    >();
     clipboard_ = std::make_unique<ClipboardManager>();
     router_ = std::make_unique<ScreenRouter>();
     fileTransfer_ = std::make_unique<FileTransferManager>();
@@ -552,7 +653,13 @@ void App::launchClient(const AppConfig& cfg, const std::string& host,
 
     client_ = std::make_unique<NetworkClient>(token,
         cfg.controlPort, cfg.dataPort, cfg.udpPort);
-    injector_ = std::make_unique<WinInputInjector>();
+    injector_ = std::make_unique<
+#ifdef _WIN32
+        WinInputInjector
+#else
+        LinuxInputInjector
+#endif
+    >();
     clipboard_ = std::make_unique<ClipboardManager>();
     fileTransfer_ = std::make_unique<FileTransferManager>();
 
@@ -956,7 +1063,11 @@ void App::wireServerCallbacks() {
     });
     router_->onWarpCursor([this](int32_t x, int32_t y) {
         if (capturer_) capturer_->warpCursor(x, y);
+#ifdef _WIN32
+        // 仅在 server 模式下存在 capturer_；client 模式（被控端）没有 capturer_，
+        // 此时本地光标由对端驱动，无需 warp，故 SetCursorPos 仅 Windows 兜底。
         else SetCursorPos(x, y);
+#endif
     });
     router_->onReleaseButtons([this] {
         if (capturer_) capturer_->releaseAllButtons();

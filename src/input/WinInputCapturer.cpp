@@ -73,7 +73,27 @@ void WinInputCapturer::warpCursor(int32_t x, int32_t y) {
     warp_.y.store(y);
     warp_.untilMs.store(static_cast<int64_t>(GetTickCount64()) + 15);
     warp_.remaining.store(1);
+
+    // VMware / VirtualBox 等虚拟机在抓取鼠标时会调用 ClipCursor 将光标
+    // 限制在虚拟机窗口内，导致 SetCursorPos 无法将光标移回屏幕边缘，
+    // 跨屏穿越检测卡死。先释放 ClipCursor 的限制再移动光标。
+    ClipCursor(nullptr);
+
     SetCursorPos(x, y);
+
+    // 验证光标是否真的移动到了目标位置。如果 VMware 仍然抓取了鼠标，
+    // SetCursorPos 可能失效——此时用 SendInput 绝对定位作为后备。
+    POINT pt{};
+    if (GetCursorPos(&pt) && (pt.x != x || pt.y != y)) {
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        INPUT input{};
+        input.type = INPUT_MOUSE;
+        input.mi.dx = (sw > 0) ? MulDiv(x, 65535, sw - 1) : 0;
+        input.mi.dy = (sh > 0) ? MulDiv(y, 65535, sh - 1) : 0;
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        SendInput(1, &input, sizeof(INPUT));
+    }
 }
 
 void WinInputCapturer::releaseAllButtons() {

@@ -312,11 +312,19 @@ LRESULT CALLBACK WinInputCapturer::mouseProc(int code, WPARAM wParam, LPARAM lPa
             return 1;
         }
 
-        // 远程控制期间持续释放 ClipCursor 限制。某些应用（Everything
-        // 搜索、VMware 等）会在收到鼠标事件时重新 ClipCursor 将光标
-        // 限制在自身窗口内，导致跨屏穿越后光标无法自由移动。
-        if (instance_->suppress_.load()) {
-            ClipCursor(nullptr);
+        // 当鼠标接近屏幕边缘或处于远程控制期间时，持续释放 ClipCursor。
+        // Everything、VMware 等应用会通过 ClipCursor 将光标限制在自身窗口内，
+        // 如果不在接近边缘时提前释放，鼠标根本到不了屏幕边缘，
+        // 跨屏穿越检测永远无法触发。
+        {
+            int sw = GetSystemMetrics(SM_CXSCREEN);
+            int sh = GetSystemMetrics(SM_CYSCREEN);
+            const int margin = 5;
+            bool nearEdge = (mx <= margin || mx >= sw - 1 - margin ||
+                             my <= margin || my >= sh - 1 - margin);
+            if (nearEdge || instance_->suppress_.load()) {
+                ClipCursor(nullptr);
+            }
         }
 
         InputEvent ev{};

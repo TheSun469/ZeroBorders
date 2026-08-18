@@ -312,6 +312,13 @@ LRESULT CALLBACK WinInputCapturer::mouseProc(int code, WPARAM wParam, LPARAM lPa
             return 1;
         }
 
+        // 远程控制期间持续释放 ClipCursor 限制。某些应用（Everything
+        // 搜索、VMware 等）会在收到鼠标事件时重新 ClipCursor 将光标
+        // 限制在自身窗口内，导致跨屏穿越后光标无法自由移动。
+        if (instance_->suppress_.load()) {
+            ClipCursor(nullptr);
+        }
+
         InputEvent ev{};
         ev.timestamp = static_cast<uint64_t>(info->time);
 
